@@ -10,12 +10,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 
 # --- Configuration ---
-BOT_TOKEN = "8842030206:AAESkQUHJWrz_N-Ls7BE1em5-nY0APNgGFs"
+BOT_TOKEN = "8912103286:AAGBQTFYrTRFMGa6tEW5UHMtt3qCR6KcN8w"
 SECRET_PASS = "mansour$vx"
 DB_NAME = "bot_database.db"
 
 # Render URL (Deploy hone ke baad Render dashboard se aapki service ka URL yahan daalein)
-# Format: https://your-service-name.onrender.com
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 bot = Bot(token=BOT_TOKEN)

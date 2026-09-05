@@ -1,6 +1,8 @@
 import asyncio
+import os
 import random
 import aiosqlite
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,10 +14,50 @@ BOT_TOKEN = "8842030206:AAESkQUHJWrz_N-Ls7BE1em5-nY0APNgGFs"
 SECRET_PASS = "mansour$vx"
 DB_NAME = "bot_database.db"
 
+# Render URL (Deploy hone ke baad Render dashboard se aapki service ka URL yahan daalein)
+# Format: https://your-service-name.onrender.com
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- Database Setup ---
+# --- Health Checker & Web Server ---
+async def handle_ping(request):
+    return web.Response(text="Bot is Active and Running 24/7!", status=200)
+
+async def handle_health(request):
+    return web.json_response({
+        "status": "healthy",
+        "bot": "online",
+        "database": "connected"
+    }, status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_health)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# --- Anti-Sleep Keep-Alive Background Worker ---
+async def keep_alive():
+    await asyncio.sleep(60)  # Server start hone ka wait
+    while True:
+        target_url = RENDER_EXTERNAL_URL or "http://127.0.0.1:8080"
+        try:
+            async with ClientSession() as session:
+                async with session.get(f"{target_url}/health") as resp:
+                    if resp.status == 200:
+                        pass
+        except Exception:
+            pass
+        await asyncio.sleep(600)  # Har 10 minute me self-ping karega taaki sleep na ho
+
+# --- Database ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
@@ -28,15 +70,6 @@ async def init_db():
             monthly_msgs INTEGER DEFAULT 0,
             total_msgs INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, chat_id)
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS appeals (
-            ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            chat_id INTEGER,
-            reason TEXT,
-            status TEXT DEFAULT 'Pending'
         );
         """)
         await db.commit()
@@ -71,25 +104,18 @@ def admin_panel_kb():
          InlineKeyboardButton(text="👋 Welcome & Captcha", callback_data="p_greet")],
         [InlineKeyboardButton(text="🚫 Word & Link Filters", callback_data="p_filters"),
          InlineKeyboardButton(text="⏳ Warns & Auto-Delete", callback_data="p_warns")],
-        [InlineKeyboardButton(text="🎭 Media & Permissions", callback_data="p_media"),
-         InlineKeyboardButton(text="💬 Custom Auto-Replies", callback_data="p_custom")],
-        [InlineKeyboardButton(text="📊 Recurring Broadcasts", callback_data="p_recur"),
-         InlineKeyboardButton(text="📋 Review & Log Setup", callback_data="p_logs")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="p_back"),
          InlineKeyboardButton(text="❌ Close", callback_data="close_menu")]
     ])
 
-# --- FSM States ---
 class BotStates(StatesGroup):
     admin_pass = State()
 
-# --- Kundli Predictions ---
 KUNDLI_PREDICTIONS = [
     "Aaj admin se bina baat ki daant padne ke 99% yog hain. Shant rahein! 🧘‍♂️",
     "Grah bata rahe hain ki aaj aapka message group me viral hoga. ✨",
     "Dhan labh ke yog hain, recharge pack bachakar rakhein. 📶",
-    "Aaj group me crush se reply aane ke pure chances hain. ❤️",
-    "Galti se kisi galat message par report dabane ke aasar hain. Savdhan rahein! ⚠️"
+    "Aaj group me crush se reply aane ke pure chances hain. ❤️"
 ]
 
 # --- Handlers ---
@@ -161,6 +187,9 @@ async def cb_close(cb: types.CallbackQuery):
 # --- Main Entry Point ---
 async def main():
     await init_db()
+    await start_web_server()
+    asyncio.create_task(keep_alive())
+    
     await bot.set_my_commands([
         BotCommand(command="start", description="Open Main Menu"),
         BotCommand(command="report", description="Report msg to admins"),

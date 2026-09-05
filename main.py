@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile, BotCommandScopeChat, BotCommandScopeDefault
 
 # --- Configuration ---
 BOT_TOKEN = "8912103286:AAGBQTFYrTRFMGa6tEW5UHMtt3qCR6KcN8w"
@@ -72,8 +72,7 @@ async def init_db():
             chat_id INTEGER PRIMARY KEY,
             title TEXT,
             antiflood INTEGER DEFAULT 1,
-            welcome_status INTEGER DEFAULT 0,
-            masked_users INTEGER DEFAULT 1
+            welcome_status INTEGER DEFAULT 0
         );
         """)
         await db.execute("""
@@ -94,6 +93,11 @@ async def init_db():
             PRIMARY KEY (user_id, chat_key)
         );
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS admin_claims (
+            user_id INTEGER PRIMARY KEY
+        );
+        """)
         await db.commit()
 
 async def add_msg_count(user_id: int, chat_id: int, username: str, full_name: str):
@@ -109,6 +113,12 @@ async def add_msg_count(user_id: int, chat_id: int, username: str, full_name: st
             full_name = excluded.full_name;
         """, (user_id, chat_id, username, full_name))
         await db.commit()
+
+async def is_claimed_admin(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT 1 FROM admin_claims WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
 
 # --- PIL Image Generation for Leaderboards ---
 async def generate_rank_card(title: str, top_users: list):
@@ -129,8 +139,8 @@ async def generate_rank_card(title: str, top_users: list):
     for idx, user in enumerate(top_users, 1):
         name = user[0] or "Unknown"
         msgs = user[1]
-        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"{idx}."
-        text = f"{medal}  {name} — {msgs} Messages"
+        medal = "1." if idx == 1 else "2." if idx == 2 else "3." if idx == 3 else f"{idx}."
+        text = f"{medal} {name} — {msgs} Messages"
         draw.text((40, y), text, fill=(255, 255, 255), font=font_item)
         y += 60
 
@@ -155,11 +165,12 @@ def user_start_kb():
     ])
 
 def group_selector_kb(groups):
-    buttons = [[InlineKeyboardButton(text=title, callback_data=f"select_group_{cid}")] for cid, title in groups]
+    buttons = [[InlineKeyboardButton(text=f"{title}", callback_data=f"select_group_{cid}")] for cid, title in groups]
     buttons.append([InlineKeyboardButton(text="Back", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def main_admin_panel_kb():
+    bot_info = asyncio.run_coroutine_threadsafe(bot.get_me(), bot._loop) if False else None # Handled dynamically via handler
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Add me to a Group", url="https://t.me/8912103286_bot?startgroup=true")],
         [InlineKeyboardButton(text="Manage group Settings", callback_data="admin_manage_groups")],
@@ -177,55 +188,55 @@ def group_settings_menu_kb(chat_id: int):
         [InlineKeyboardButton(text="Media", callback_data=f"gs_media_{chat_id}"), InlineKeyboardButton(text="Porn", callback_data=f"gs_porn_{chat_id}")],
         [InlineKeyboardButton(text="Warns", callback_data=f"gs_warns_{chat_id}"), InlineKeyboardButton(text="Night", callback_data=f"gs_night_{chat_id}")],
         [InlineKeyboardButton(text="Tag", callback_data=f"gs_tag_{chat_id}"), InlineKeyboardButton(text="Link", callback_data=f"gs_link_{chat_id}")],
-        [InlineKeyboardButton(text="Banned Words", callback_data=f"gs_bwords_{chat_id}"), InlineKeyboardButton(text="Recurring message", callback_data=f"gs_recurring_{chat_id}")],
+        [InlineKeyboardButton(text="Banned Words", callback_data=f"gs_bwords_{chat_id}"), InlineKeyboardButton(text="Recurring messages", callback_data=f"gs_recurring_{chat_id}")],
         [InlineKeyboardButton(text="Masked users", callback_data=f"gs_masked_{chat_id}"), InlineKeyboardButton(text="Message length", callback_data=f"gs_mlen_{chat_id}")],
         [InlineKeyboardButton(text="Personal Commands", callback_data=f"gs_pcommands_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data="admin_manage_groups"), InlineKeyboardButton(text="Close", callback_data="close_menu")]
     ])
 
-def antiflood_settings_kb(chat_id: int):
+def anti_flood_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Messages", callback_data=f"af_msgs_{chat_id}"), InlineKeyboardButton(text="Time", callback_data=f"af_time_{chat_id}")],
         [InlineKeyboardButton(text="Off", callback_data=f"af_off_{chat_id}"), InlineKeyboardButton(text="Warn", callback_data=f"af_warn_{chat_id}")],
         [InlineKeyboardButton(text="Kick", callback_data=f"af_kick_{chat_id}"), InlineKeyboardButton(text="Mute", callback_data=f"af_mute_{chat_id}"), InlineKeyboardButton(text="Ban", callback_data=f"af_ban_{chat_id}")],
         [InlineKeyboardButton(text="Delete Messages", callback_data=f"af_del_{chat_id}")],
-        [InlineKeyboardButton(text="Set mute duration", callback_data=f"af_duration_{chat_id}")],
+        [InlineKeyboardButton(text="Set mute duration", callback_data=f"af_mdur_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def warns_settings_kb(chat_id: int):
+def warns_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Warned List", callback_data=f"w_list_{chat_id}")],
         [InlineKeyboardButton(text="Off", callback_data=f"w_off_{chat_id}"), InlineKeyboardButton(text="Kick", callback_data=f"w_kick_{chat_id}")],
         [InlineKeyboardButton(text="Mute", callback_data=f"w_mute_{chat_id}"), InlineKeyboardButton(text="Ban", callback_data=f"w_ban_{chat_id}")],
-        [InlineKeyboardButton(text="Set mute duration", callback_data=f"w_duration_{chat_id}")],
-        [InlineKeyboardButton(text="2", callback_data=f"w_cnt_2_{chat_id}"), InlineKeyboardButton(text="3", callback_data=f"w_cnt_3_{chat_id}"), InlineKeyboardButton(text="4", callback_data=f"w_cnt_4_{chat_id}")],
-        [InlineKeyboardButton(text="5", callback_data=f"w_cnt_5_{chat_id}"), InlineKeyboardButton(text="6", callback_data=f"w_cnt_6_{chat_id}")],
+        [InlineKeyboardButton(text="Set mute duration", callback_data=f"w_mdur_{chat_id}")],
+        [InlineKeyboardButton(text="2", callback_data=f"w_cnt_2_{chat_id}"), InlineKeyboardButton(text="3", callback_data=f"w_cnt_3_{chat_id}"), InlineKeyboardButton(text="4", callback_data=f"w_cnt_4_{chat_id}"), InlineKeyboardButton(text="5", callback_data=f"w_cnt_5_{chat_id}"), InlineKeyboardButton(text="6", callback_data=f"w_cnt_6_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def banned_words_settings_kb(chat_id: int):
+def banned_words_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Off", callback_data=f"bw_off_{chat_id}"), InlineKeyboardButton(text="Warn", callback_data=f"bw_warn_{chat_id}"), InlineKeyboardButton(text="Kick", callback_data=f"bw_kick_{chat_id}")],
         [InlineKeyboardButton(text="Mute", callback_data=f"bw_mute_{chat_id}"), InlineKeyboardButton(text="Ban", callback_data=f"bw_ban_{chat_id}")],
         [InlineKeyboardButton(text="Delete Messages", callback_data=f"bw_del_{chat_id}")],
-        [InlineKeyboardButton(text="Add", callback_data=f"bw_add_{chat_id}"), InlineKeyboardButton(text="Remove", callback_data=f"bw_remove_{chat_id}")],
+        [InlineKeyboardButton(text="Add", callback_data=f"bw_add_{chat_id}"), InlineKeyboardButton(text="Remove", callback_data=f"bw_rem_{chat_id}")],
         [InlineKeyboardButton(text="List", callback_data=f"bw_list_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def recurring_messages_kb(chat_id: int):
+def recurring_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Add message", callback_data=f"rec_add_{chat_id}")],
-        [InlineKeyboardButton(text="1", callback_data=f"rec_item_1_{chat_id}"), InlineKeyboardButton(text="Active", callback_data=f"rec_active_{chat_id}"), InlineKeyboardButton(text="Delete", callback_data=f"rec_del_{chat_id}")],
+        [InlineKeyboardButton(text="Add message", callback_data=f"rc_add_{chat_id}")],
+        [InlineKeyboardButton(text="Active", callback_data=f"rc_toggle_{chat_id}"), InlineKeyboardButton(text="Delete", callback_data=f"rc_del_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def masked_users_kb(chat_id: int):
+def masked_users_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Turn off", callback_data=f"mu_off_{chat_id}"), InlineKeyboardButton(text="Turn on", callback_data=f"mu_on_{chat_id}")],
         [InlineKeyboardButton(text="Delete Messages", callback_data=f"mu_del_{chat_id}")],
-        [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}"), InlineKeyboardButton(text="Exceptions", callback_data=f"mu_exc_{chat_id}")]
+        [InlineKeyboardButton(text="Exceptions", callback_data=f"mu_exc_{chat_id}")],
+        [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
 def personal_commands_menu_kb(chat_id: int):
@@ -257,7 +268,7 @@ async def cmd_start(msg: types.Message):
 @dp.message(Command("claim"))
 async def cmd_claim(msg: types.Message, state: FSMContext):
     if msg.chat.type == "private":
-        await msg.answer("Please enter your Admin Access Key:")
+        await msg.answer("Please enter Admin Access Key:")
         await state.set_state(BotStates.admin_pass)
 
 @dp.message(BotStates.admin_pass)
@@ -267,21 +278,37 @@ async def process_admin_key(msg: types.Message, state: FSMContext):
             await msg.delete()
         except Exception:
             pass
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("INSERT OR IGNORE INTO admin_claims (user_id) VALUES (?)", (msg.from_user.id,))
+            await db.commit()
         await state.clear()
+        
+        # Refresh command visibility for this admin
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Open Main Menu"),
+                BotCommand(command="setting", description="Open Admin Panel")
+            ],
+            scope=BotCommandScopeChat(chat_id=msg.from_user.id)
+        )
+        
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
-            caption="Helper Bot Panel\nManage your groups easily and safely:",
+            caption="Manage group Settings\nSelect an option below:",
             reply_markup=main_admin_panel_kb(),
             parse_mode="Markdown"
         )
     else:
-        await msg.answer("Incorrect Password. Access Denied.")
+        await msg.answer("Incorrect Password! Access Denied.")
         await state.clear()
 
 @dp.message(Command("setting"))
 async def cmd_setting(msg: types.Message):
     if msg.chat.type == "private":
+        if not await is_claimed_admin(msg.from_user.id):
+            await msg.answer("Access denied! Please use /claim first.")
+            return
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
@@ -297,7 +324,7 @@ async def cb_manage_groups(cb: types.CallbackQuery):
             groups = await cursor.fetchall()
     
     if not groups:
-        await cb.answer("No groups registered yet! Please add the bot to a group first.", show_alert=True)
+        await cb.answer("No groups registered! First add the bot to a group.", show_alert=True)
         return
         
     await cb.message.edit_caption(
@@ -328,50 +355,46 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
     
     if action == "flood":
         await cb.message.edit_caption(
-            caption="Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently the antiflood is triggered when 3 messages are sent within 2 seconds.\nPunishment: Mute 10 Minutes + Deletion",
-            reply_markup=antiflood_settings_kb(chat_id),
-            parse_mode="Markdown"
+            caption="Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.",
+            reply_markup=anti_flood_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "warns":
         await cb.message.edit_caption(
-            caption="User warnings\nThe warning system allows you to give warnings to users for incorrect behavior in the group, before actually punishing them.\n\nPunishment: Mute 1 Hours\nMax Warns allowed: 3",
-            reply_markup=warns_settings_kb(chat_id),
-            parse_mode="Markdown"
+            caption="User warnings\nThe warning system allows you to give warnings to users for incorrect behavior.",
+            reply_markup=warns_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "bwords":
         await cb.message.edit_caption(
-            caption="Banned Words\nFrom this menu you can set a punishment for users who use the words you decide to ban.\n\nPenalty: Off\nDeletion: Yes",
-            reply_markup=banned_words_settings_kb(chat_id),
-            parse_mode="Markdown"
+            caption="Banned Words\nFrom this menu you can set a punishment for users who use banned words.",
+            reply_markup=banned_words_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "recurring":
         await cb.message.edit_caption(
-            caption="Recurring messages\nFrom this menu you can set messages that will be sent repeatedly to the group every few minutes/hours or every few messages.",
-            reply_markup=recurring_messages_kb(chat_id),
-            parse_mode="Markdown"
+            caption="Recurring messages\nFrom this menu you can set messages that will be sent repeatedly.",
+            reply_markup=recurring_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "masked":
         await cb.message.edit_caption(
-            caption="Masked users\nThrough this menu you can set a punishment for users who write in the group masquerading as a channel.\n\nStatus: Active",
-            reply_markup=masked_users_kb(chat_id),
-            parse_mode="Markdown"
+            caption="Masked users\nThrough this menu you can set punishment for users writing disguised as a channel.",
+            reply_markup=masked_users_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "pcommands":
         await cb.message.edit_caption(
             caption="Personal Commands, Personal Replies, Commands Alias",
-            reply_markup=personal_commands_menu_kb(chat_id),
-            parse_mode="Markdown"
+            reply_markup=personal_commands_menu_kb(chat_id), parse_mode="Markdown"
         )
     else:
         await cb.answer(f"Opening {action.upper()} settings...", show_alert=False)
 
-@dp.callback_query(F.data.startswith("af_") or F.data.startswith("w_") or F.data.startswith("bw_") or F.data.startswith("rec_") or F.data.startswith("mu_") or F.data.startswith("pc_"))
-async def cb_sub_setting_actions(cb: types.CallbackQuery):
-    await cb.answer("Configuration updated successfully!", show_alert=False)
+@dp.callback_query(F.data.startswith(("af_", "w_", "bw_", "rc_", "mu_", "pc_")))
+async def cb_submenu_actions(cb: types.CallbackQuery):
+    await cb.answer("Setting updated successfully!", show_alert=False)
 
 # --- Direct Group Moderation Commands ---
 @dp.message(Command("userid"))
 async def cmd_userid(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     target = msg.reply_to_message.from_user if msg.reply_to_message else msg.from_user
     await msg.reply(f"User ID for {target.first_name}: `{target.id}`", parse_mode="Markdown")
 
@@ -383,7 +406,7 @@ async def cmd_ban(msg: types.Message):
         await msg.reply("This command is only for group admins!")
         return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to a user's message to ban them.")
+        await msg.reply("Please reply to a user's message to ban.")
         return
     
     target_user = msg.reply_to_message.from_user
@@ -392,11 +415,7 @@ async def cmd_ban(msg: types.Message):
         appeal_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Submit Appeal", url=f"https://t.me/8912103286_bot?start=appeal_{msg.chat.id}")]
         ])
-        await msg.answer(
-            f"{target_user.mention_html()} has been successfully banned.", 
-            reply_markup=appeal_kb, 
-            parse_mode="HTML"
-        )
+        await msg.answer(f"{target_user.mention_html()} has been successfully banned!", reply_markup=appeal_kb, parse_mode="HTML")
     except Exception as e:
         await msg.reply(f"Error banning user: {e}")
 
@@ -408,13 +427,13 @@ async def cmd_unban(msg: types.Message):
         await msg.reply("This command is only for group admins!")
         return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to a user's message to unban them.")
+        await msg.reply("Please reply to a user's message to unban.")
         return
     
     target_user = msg.reply_to_message.from_user
     try:
         await bot.unban_chat_member(chat_id=msg.chat.id, user_id=target_user.id, only_if_banned=True)
-        await msg.reply(f"{target_user.mention_html()} has been successfully unbanned.", parse_mode="HTML")
+        await msg.reply(f"{target_user.mention_html()} has been unbanned!", parse_mode="HTML")
     except Exception as e:
         await msg.reply(f"Error unbanning user: {e}")
 
@@ -426,7 +445,7 @@ async def cmd_mute(msg: types.Message):
         await msg.reply("This command is only for group admins!")
         return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to a user's message to mute them.")
+        await msg.reply("Please reply to a user's message to mute.")
         return
     
     target_user = msg.reply_to_message.from_user
@@ -436,11 +455,7 @@ async def cmd_mute(msg: types.Message):
         appeal_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Submit Appeal", url=f"https://t.me/8912103286_bot?start=appeal_{msg.chat.id}")]
         ])
-        await msg.answer(
-            f"{target_user.mention_html()} has been muted.", 
-            reply_markup=appeal_kb, 
-            parse_mode="HTML"
-        )
+        await msg.answer(f"{target_user.mention_html()} has been muted!", reply_markup=appeal_kb, parse_mode="HTML")
     except Exception as e:
         await msg.reply(f"Error muting user: {e}")
 
@@ -452,19 +467,14 @@ async def cmd_unmute(msg: types.Message):
         await msg.reply("This command is only for group admins!")
         return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to a user's message to unmute them.")
+        await msg.reply("Please reply to a user's message to unmute.")
         return
     
     target_user = msg.reply_to_message.from_user
     try:
-        permissions = types.ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        )
+        permissions = types.ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
         await bot.restrict_chat_member(chat_id=msg.chat.id, user_id=target_user.id, permissions=permissions)
-        await msg.reply(f"{target_user.mention_html()} has been unmuted.", parse_mode="HTML")
+        await msg.reply(f"{target_user.mention_html()} has been unmuted!", parse_mode="HTML")
     except Exception as e:
         await msg.reply(f"Error unmuting user: {e}")
 
@@ -476,7 +486,7 @@ async def cb_menu_appeal(cb: types.CallbackQuery):
             groups = await cursor.fetchall()
             
     if not groups:
-        await cb.answer("No groups available at the moment!", show_alert=True)
+        await cb.answer("No groups available!", show_alert=True)
         return
         
     await cb.message.edit_caption(
@@ -504,7 +514,7 @@ async def cb_select_appeal_group(cb: types.CallbackQuery, state: FSMContext):
         async with db.execute("SELECT appeal_used FROM ban_tracker WHERE user_id = ? AND chat_key = ?", (cb.from_user.id, str(chat_id))) as cursor:
             row = await cursor.fetchone()
             if row and row[0] == 1:
-                await cb.answer("You have already submitted an appeal for this ban cycle!", show_alert=True)
+                await cb.answer("You have already appealed for this ban cycle!", show_alert=True)
                 return
 
     async with aiosqlite.connect(DB_NAME) as db:
@@ -515,7 +525,7 @@ async def cb_select_appeal_group(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(appeal_chat_id=chat_id)
     await state.set_state(BotStates.waiting_for_appeal_text)
     await cb.message.edit_caption(
-        caption=f"Appeal Form: {title}\n\nWrite your appeal message below:\n- Length: Between 20 characters and 100 words.\n- Abusive language is strictly prohibited.",
+        caption=f"Appeal Form: {title}\n\nWrite your appeal message:\n- Length: Between 20 letters and 100 words.\n- No abusive language allowed.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="menu_back")]]),
         parse_mode="Markdown"
     )
@@ -526,11 +536,11 @@ async def process_appeal_text(msg: types.Message, state: FSMContext):
     words = text.split()
     
     if len(text) < 20 or len(words) > 100:
-        await msg.reply("Appeal message must be between 20 characters and 100 words. Please write again:")
+        await msg.reply("Appeal message must be between 20 letters and 100 words. Please write again:")
         return
 
     if any(word in text.lower() for word in PROFANITY_WORDS):
-        await msg.reply("Inappropriate language detected in your message. Please write a respectful appeal:")
+        await msg.reply("Inappropriate language detected. Please write your appeal properly:")
         return
 
     data = await state.get_data()
@@ -560,6 +570,8 @@ async def cb_close(cb: types.CallbackQuery):
 # --- Engagement & Rank Commands ---
 @dp.message(Command("today"))
 async def cmd_today(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT full_name, daily_msgs FROM users WHERE chat_id = ? ORDER BY daily_msgs DESC LIMIT 3", (msg.chat.id,)) as cursor:
             rows = await cursor.fetchall()
@@ -568,6 +580,8 @@ async def cmd_today(msg: types.Message):
 
 @dp.message(Command("weekly"))
 async def cmd_weekly(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT full_name, weekly_msgs FROM users WHERE chat_id = ? ORDER BY weekly_msgs DESC LIMIT 3", (msg.chat.id,)) as cursor:
             rows = await cursor.fetchall()
@@ -576,41 +590,49 @@ async def cmd_weekly(msg: types.Message):
 
 @dp.message(Command("lead"))
 async def cmd_lead(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT full_name, total_msgs FROM users WHERE chat_id = ? ORDER BY total_msgs DESC LIMIT 5", (msg.chat.id,)) as cursor:
             rows = await cursor.fetchall()
     photo = await generate_rank_card("All-Time Leaderboard", rows)
     await msg.answer_photo(photo=photo, caption="All-time top chatters leaderboard!")
 
-# --- Kundli & Ship ---
-KUNDLI_PREDICTIONS = [
-    "High chances of getting scolded by admins today without reason. Stay calm!",
-    "The stars indicate your message will go viral in the group today.",
-    "Financial gains foreseen, keep your data pack saved.",
-    "High probability of receiving a reply from your crush today."
+# --- Kundli & Ship (Kundli in Hindi) ---
+KUNDLI_PREDICTIONS_HI = [
+    "आज एडमिन से बिना बात के डांट पड़ने के 99% योग हैं। शांत रहें!",
+    "ग्रह बता रहे हैं कि आज आपका मैसेज ग्रुप में वायरल होगा।",
+    "धन लाभ के योग हैं, अपना रिचार्ज पैक बचाकर रखें।",
+    "आज ग्रुप में क्रश से रिप्लाई आने के पूरे चांस हैं।"
 ]
 
 @dp.message(Command("kundli"))
 async def cmd_kundli(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     target = msg.reply_to_message.from_user if msg.reply_to_message else msg.from_user
-    fortune = random.choice(KUNDLI_PREDICTIONS)
-    await msg.reply(f"Kundli prediction for {target.mention_html()}:\n\n{fortune}", parse_mode="HTML")
+    fortune = random.choice(KUNDLI_PREDICTIONS_HI)
+    await msg.reply(f"**{target.first_name} की कुंडली फल:**\n\n{fortune}", parse_mode="Markdown")
 
 @dp.message(Command("ship"))
 async def cmd_ship(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to someone's message to use the /ship command!")
+        await msg.reply("Please reply to another user's message to use the /ship command!")
         return
     score = random.randint(10, 100)
     user1 = msg.from_user.mention_html()
     user2 = msg.reply_to_message.from_user.mention_html()
-    await msg.reply(f"Match Compatibility:\n{user1} ❤️ {user2}\nScore: {score}%", parse_mode="HTML")
+    await msg.reply(f"Match Compatibility:\n{user1} & {user2}\nScore: `{score}%`", parse_mode="HTML")
 
 # --- Moderation, Reports & Admin Tags ---
 @dp.message(Command("report"))
 async def cmd_report(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
     if not msg.reply_to_message:
-        await msg.reply("Please reply to a message and type /report.")
+        await msg.reply("Please reply to a message to report.")
         return
     reported_user = msg.reply_to_message.from_user
     reporter = msg.from_user
@@ -651,9 +673,14 @@ async def main():
     await start_web_server()
     asyncio.create_task(keep_alive())
     
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Open Main Menu"),
-        BotCommand(command="setting", description="Open Admin Panel"),
+    # Default commands for regular users in private (only start)
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Open Main Menu")],
+        scope=BotCommandScopeDefault()
+    )
+    
+    # Group commands available in groups
+    group_commands = [
         BotCommand(command="today", description="Today top chatters"),
         BotCommand(command="weekly", description="Weekly top chatters"),
         BotCommand(command="lead", description="All-time leaderboard"),
@@ -666,7 +693,9 @@ async def main():
         BotCommand(command="mute", description="Mute user via reply"),
         BotCommand(command="unmute", description="Unmute user via reply"),
         BotCommand(command="userid", description="Get user ID")
-    ])
+    ]
+    
+    # We can set group default commands if needed or let them register natively
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

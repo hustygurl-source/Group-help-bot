@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile, BotCommandScopeDefault
 
 # --- Configuration ---
 BOT_TOKEN = "8912103286:AAGBQTFYrTRFMGa6tEW5UHMtt3qCR6KcN8w"
@@ -140,7 +140,7 @@ async def generate_rank_card(title: str, top_users: list):
         name = user[0] or "Unknown"
         msgs = user[1]
         medal = "1." if idx == 1 else "2." if idx == 2 else "3." if idx == 3 else f"{idx}."
-        text = f"{medal} {name} — {msgs} Messages"
+        text = f"{medal} {name} - {msgs} Messages"
         draw.text((40, y), text, fill=(255, 255, 255), font=font_item)
         y += 60
 
@@ -170,10 +170,8 @@ def group_selector_kb(groups):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def main_admin_panel_kb():
-    bot_info = asyncio.run_coroutine_threadsafe(bot.get_me(), bot._loop) if False else None # Handled dynamically via handler
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Add me to a Group", url="https://t.me/8912103286_bot?startgroup=true")],
-        [InlineKeyboardButton(text="Manage group Settings", callback_data="admin_manage_groups")],
+        [InlineKeyboardButton(text="Manage Groups", callback_data="admin_manage_groups")],
         [InlineKeyboardButton(text="Group", callback_data="adm_group"), InlineKeyboardButton(text="Channel", callback_data="adm_channel")],
         [InlineKeyboardButton(text="Close", callback_data="close_menu")]
     ])
@@ -188,7 +186,7 @@ def group_settings_menu_kb(chat_id: int):
         [InlineKeyboardButton(text="Media", callback_data=f"gs_media_{chat_id}"), InlineKeyboardButton(text="Porn", callback_data=f"gs_porn_{chat_id}")],
         [InlineKeyboardButton(text="Warns", callback_data=f"gs_warns_{chat_id}"), InlineKeyboardButton(text="Night", callback_data=f"gs_night_{chat_id}")],
         [InlineKeyboardButton(text="Tag", callback_data=f"gs_tag_{chat_id}"), InlineKeyboardButton(text="Link", callback_data=f"gs_link_{chat_id}")],
-        [InlineKeyboardButton(text="Banned Words", callback_data=f"gs_bwords_{chat_id}"), InlineKeyboardButton(text="Recurring messages", callback_data=f"gs_recurring_{chat_id}")],
+        [InlineKeyboardButton(text="Banned Words", callback_data=f"gs_bwords_{chat_id}"), InlineKeyboardButton(text="Recurring message", callback_data=f"gs_recurring_{chat_id}")],
         [InlineKeyboardButton(text="Masked users", callback_data=f"gs_masked_{chat_id}"), InlineKeyboardButton(text="Message length", callback_data=f"gs_mlen_{chat_id}")],
         [InlineKeyboardButton(text="Personal Commands", callback_data=f"gs_pcommands_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data="admin_manage_groups"), InlineKeyboardButton(text="Close", callback_data="close_menu")]
@@ -242,8 +240,8 @@ def masked_users_menu_kb(chat_id: int):
 def personal_commands_menu_kb(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Personal Commands", callback_data=f"pc_cmd_{chat_id}")],
-        [InlineKeyboardButton(text="Personal Replies", callback_data=f"pc_rep_{chat_id}")],
-        [InlineKeyboardButton(text="Commands Alias", callback_data=f"pc_alias_{chat_id}")],
+        [InlineKeyboardButton(text="User Command", callback_data=f"pc_rep_{chat_id}")],
+        [InlineKeyboardButton(text="User Incline Button", callback_data=f"pc_alias_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
@@ -283,19 +281,10 @@ async def process_admin_key(msg: types.Message, state: FSMContext):
             await db.commit()
         await state.clear()
         
-        # Refresh command visibility for this admin
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Open Main Menu"),
-                BotCommand(command="setting", description="Open Admin Panel")
-            ],
-            scope=BotCommandScopeChat(chat_id=msg.from_user.id)
-        )
-        
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
-            caption="Manage group Settings\nSelect an option below:",
+            caption="Manage Group Settings\nSelect an option below:",
             reply_markup=main_admin_panel_kb(),
             parse_mode="Markdown"
         )
@@ -312,7 +301,7 @@ async def cmd_setting(msg: types.Message):
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
-            caption="Manage group Settings\nSelect an option below:",
+            caption="Manage Group Settings\nSelect an option below:",
             reply_markup=main_admin_panel_kb(),
             parse_mode="Markdown"
         )
@@ -380,7 +369,7 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
         )
     elif action == "pcommands":
         await cb.message.edit_caption(
-            caption="Personal Commands, Personal Replies, Commands Alias",
+            caption="Personal Commands, User Command, User Incline Button",
             reply_markup=personal_commands_menu_kb(chat_id), parse_mode="Markdown"
         )
     else:
@@ -679,23 +668,6 @@ async def main():
         scope=BotCommandScopeDefault()
     )
     
-    # Group commands available in groups
-    group_commands = [
-        BotCommand(command="today", description="Today top chatters"),
-        BotCommand(command="weekly", description="Weekly top chatters"),
-        BotCommand(command="lead", description="All-time leaderboard"),
-        BotCommand(command="kundli", description="Astrology prediction"),
-        BotCommand(command="ship", description="Compatibility meter"),
-        BotCommand(command="report", description="Report message"),
-        BotCommand(command="admin", description="Tag all admins"),
-        BotCommand(command="ban", description="Ban user via reply"),
-        BotCommand(command="unban", description="Unban user via reply"),
-        BotCommand(command="mute", description="Mute user via reply"),
-        BotCommand(command="unmute", description="Unmute user via reply"),
-        BotCommand(command="userid", description="Get user ID")
-    ]
-    
-    # We can set group default commands if needed or let them register natively
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

@@ -785,7 +785,7 @@ async def cmd_admin(msg: types.Message):
             await msg.answer("Error tagging admins.")
 
 # --- Protection & Group Activity Processor ---
-@dp.message(F.chat.type.in_["group", "supergroup"])
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_message_processor(msg: types.Message):
     chat_id = msg.chat.id
     user = msg.from_user

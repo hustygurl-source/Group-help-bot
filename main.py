@@ -1251,7 +1251,7 @@ async def cmd_lead(msg: types.Message):
     if msg.chat.type not in ["group", "supergroup"]:
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT full_name, total_msgs FROM users WHERE chat_id = ? ORDER BY total_msgs DESC LIMIT 10", (msg.chat.id,)) as cursor:
+        async with db.execute("SELECT full_name, total_msgs FROM users WHERE chat_id = ? ORDER BY total_logs DESC LIMIT 10", (msg.chat.id,)) as cursor:
             rows = await cursor.fetchall()
     photo = await generate_full_leaderboard_card("Group Leaderboard", rows)
     full_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Full Leaderboard", callback_data=f"show_lb_{msg.chat.id}")]])
@@ -1327,13 +1327,24 @@ async def cmd_admin(msg: types.Message):
         except Exception:
             await msg.answer("Error tagging admins.")
 
-# --- Auto Group Registration via Message Handler ---
+# --- Dedicated Chat Member & Message Event Listeners for Group Registration ---
+@dp.my_chat_member()
+async def on_bot_added_to_chat(event: types.ChatMemberUpdated):
+    if event.new_chat_member.status in ["member", "administrator"]:
+        chat = event.chat
+        if chat.type in ["group", "supergroup"]:
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO managed_groups (chat_id, title) VALUES (?, ?)",
+                    (chat.id, chat.title or "Group")
+                )
+                await db.commit()
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_message_processor(msg: types.Message):
     chat_id = msg.chat.id
     user = msg.from_user
     
-    # Ensure group is always registered automatically when any message arrives
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO managed_groups (chat_id, title) VALUES (?, ?)", (chat_id, msg.chat.title or "Group"))
         await db.commit()

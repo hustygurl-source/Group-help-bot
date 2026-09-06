@@ -78,11 +78,20 @@ async def init_db():
             flood_limit INTEGER DEFAULT 3,
             flood_time INTEGER DEFAULT 2,
             flood_del INTEGER DEFAULT 1,
+            max_warns INTEGER DEFAULT 3,
             mute_duration INTEGER DEFAULT 600,
             link_protection INTEGER DEFAULT 0,
             masked_users INTEGER DEFAULT 1,
             masked_del INTEGER DEFAULT 1,
             welcome_status INTEGER DEFAULT 0
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_warn_counts (
+            user_id INTEGER,
+            chat_id INTEGER,
+            warn_count INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, chat_id)
         );
         """)
         await db.execute("""
@@ -236,6 +245,10 @@ def anti_flood_menu_kb(chat_id: int, limit=3, time_sec=2, action="warn", del_msg
     ban_check = "✅ " if action == "ban" else ""
     del_check = "✅" if del_msg else "❌"
 
+    punishment_str = action.upper()
+    if del_msg:
+        punishment_str += " + DELETION"
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Messages", callback_data=f"af_msgs_{chat_id}"), InlineKeyboardButton(text="Time", callback_data=f"af_time_{chat_id}")],
         [InlineKeyboardButton(text=f"{off_check}Off", callback_data=f"af_act_off_{chat_id}"), InlineKeyboardButton(text=f"{warn_check}Warn", callback_data=f"af_act_warn_{chat_id}")],
@@ -307,6 +320,159 @@ async def is_user_admin(message: types.Message) -> bool:
         return member.status in ["creator", "administrator"]
     except Exception:
         return False
+
+# --- Core Action Execution & Notifications ---
+async def handle_user_violation(bot: Bot, chat_id: int, user: types.User, action_type: str, custom_reason: str = ""):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT max_warns, mute_duration FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    max_w = res[0] if res else 3
+    mute_dur = res[1] if res else 600
+
+    user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+    user_tag_str = f"{user_mention} [{user.id}]"
+
+    if action_type == "warn":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT warn_count FROM user_warn_counts WHERE user_id = ? AND chat_id = ?", (user.id, chat_id)) as cursor:
+                row = await cursor.fetchone()
+            current_warns = (row[0] if row else 0) + 1
+            
+            if current_warns >= max_w:
+                # Reset warns and execute Ban
+                await db.execute("DELETE FROM user_warn_counts WHERE user_id = ? AND chat_id = ?", (user.id, chat_id))
+                await db.commit()
+                
+                try:
+                    await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+                except Exception:
+                    pass
+                
+                unban_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Unban", callback_data=f"mod_unban_{user.id}_{chat_id}")]
+                ])
+                await bot.send_message(
+                    chat_id, 
+                    f"{user_tag_str} banned.\n(Max warns reached)", 
+                    reply_markup=unban_kb, 
+                    parse_mode="HTML"
+                )
+                try:
+                    appeal_link = f"https://t.me/{(await bot.get_me()).username}?start=appeal_{chat_id}"
+                    await bot.send_message(user.id, f"Aapko group se ban kar diya gaya hai. Agar aapko appeal karni hai toh is link par click karein: {appeal_link}")
+                except Exception:
+                    pass
+                return
+
+            await db.execute("INSERT OR REPLACE INTO user_warn_counts (user_id, chat_id, warn_count) VALUES (?, ?, ?)", (user.id, chat_id, current_warns))
+            await db.commit()
+
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Cancel", callback_data=f"mod_unwarn_{user.id}_{chat_id}")]
+        ])
+        await bot.send_message(
+            chat_id, 
+            f"{user_tag_str} warned ({current_warns} of {max_w}).", 
+            reply_markup=cancel_kb, 
+            parse_mode="HTML"
+        )
+
+    elif action_type == "mute":
+        try:
+            permissions = types.ChatPermissions(can_send_messages=False)
+            await bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=permissions, until_date=int(time.time() + mute_dur))
+        except Exception:
+            pass
+        
+        mute_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🕹 Permissions", callback_data=f"mod_perms_{user.id}_{chat_id}"),
+             InlineKeyboardButton(text="✅ Unmute", callback_data=f"mod_unmute_{user.id}_{chat_id}")]
+        ])
+        await bot.send_message(
+            chat_id, 
+            f"{user_tag_str} has been muted.", 
+            reply_markup=mute_kb, 
+            parse_mode="HTML"
+        )
+
+    elif action_type == "ban":
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+        except Exception:
+            pass
+
+        unban_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Unban", callback_data=f"mod_unban_{user.id}_{chat_id}")]
+        ])
+        await bot.send_message(
+            chat_id, 
+            f"{user_tag_str} banned.", 
+            reply_markup=unban_kb, 
+            parse_mode="HTML"
+        )
+        try:
+            appeal_link = f"https://t.me/{(await bot.get_me()).username}?start=appeal_{chat_id}"
+            await bot.send_message(user.id, f"Aapko group se ban kar diya gaya hai. Agar aapko appeal karni hai toh is link par click karein: {appeal_link}")
+        except Exception:
+            pass
+
+    elif action_type == "kick":
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+            await bot.unban_chat_member(chat_id=chat_id, user_id=user.id)
+        except Exception:
+            pass
+        await bot.send_message(
+            chat_id, 
+            f"{user_tag_str} has been kicked.", 
+            parse_mode="HTML"
+        )
+
+# --- Callback Handlers for Moderation Inline Buttons ---
+@dp.callback_query(F.data.startswith("mod_unwarn_"))
+async def cb_mod_unwarn(cb: types.CallbackQuery):
+    if not await is_user_admin(cb):
+        await cb.answer("Only admins can cancel warns!", show_alert=True)
+        return
+    parts = cb.data.split("_")
+    user_id = int(parts[2])
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM user_warn_counts WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        await db.commit()
+    await cb.message.edit_text(f"{cb.message.text}\n\n~ Warn cancelled by admin", reply_markup=None)
+    await cb.answer("Warn removed!")
+
+@dp.callback_query(F.data.startswith("mod_unmute_"))
+async def cb_mod_unmute(cb: types.CallbackQuery):
+    if not await is_user_admin(cb):
+        await cb.answer("Only admins can unmute users!", show_alert=True)
+        return
+    parts = cb.data.split("_")
+    user_id = int(parts[2])
+    chat_id = int(parts[3])
+    try:
+        permissions = types.ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
+        await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=permissions)
+    except Exception:
+        pass
+    await cb.message.edit_text(f"{cb.message.text}\n\n~ User unmuted", reply_markup=None)
+    await cb.answer("User unmuted successfully!")
+
+@dp.callback_query(F.data.startswith("mod_unban_"))
+async def cb_mod_unban(cb: types.CallbackQuery):
+    if not await is_user_admin(cb):
+        await cb.answer("Only admins can unban users!", show_alert=True)
+        return
+    parts = cb.data.split("_")
+    user_id = int(parts[2])
+    chat_id = int(parts[3])
+    try:
+        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+    except Exception:
+        pass
+    await cb.message.edit_text(f"{cb.message.text}\n\n~ User unbanned", reply_markup=None)
+    await cb.answer("User unbanned successfully!")
 
 # --- Handlers: Start & Menu ---
 @dp.message(Command("start"))
@@ -400,8 +566,11 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
             async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
                 res = await cursor.fetchone()
         limit, time_sec, act, del_m = res if res else (3, 2, "warn", 1)
+        punishment_text = act.upper()
+        if del_m:
+            punishment_text += " + DELETION"
         await cb.message.edit_caption(
-            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
+            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
             reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
         )
     elif action == "link":
@@ -454,8 +623,11 @@ async def cb_af_setmsg(cb: types.CallbackQuery):
         async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
     limit, time_sec, act, del_m = res
+    punishment_text = act.upper()
+    if del_m:
+        punishment_text += " + DELETION"
     await cb.message.edit_caption(
-        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
+        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
         reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
     )
     await cb.answer("Message limit updated!")
@@ -483,8 +655,11 @@ async def cb_af_settime(cb: types.CallbackQuery):
         async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
     limit, time_sec, act, del_m = res
+    punishment_text = act.upper()
+    if del_m:
+        punishment_text += " + DELETION"
     await cb.message.edit_caption(
-        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
+        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
         reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
     )
     await cb.answer("Time interval updated!")
@@ -500,7 +675,19 @@ async def cb_af_act(cb: types.CallbackQuery):
         async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
     limit, time_sec, action, del_m = res
-    await cb.message.edit_reply_markup(reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, del_m))
+    punishment_text = action.upper()
+    if del_m:
+        punishment_text += " + DELETION"
+    
+    # Also update caption text to show active punishment string properly
+    try:
+        await cb.message.edit_caption(
+            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
+            reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, del_m), parse_mode="Markdown"
+        )
+    except Exception:
+        await cb.message.edit_reply_markup(reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, del_m))
+    
     await cb.answer(f"Punishment set to {act.upper()}!")
 
 @dp.callback_query(F.data.startswith("af_del_"))
@@ -512,7 +699,19 @@ async def cb_af_del(cb: types.CallbackQuery):
         new_del = 0 if res[0] else 1
         await db.execute("UPDATE managed_groups SET flood_del = ? WHERE chat_id = ?", (new_del, chat_id))
         await db.commit()
-    await cb.message.edit_reply_markup(reply_markup=anti_flood_menu_kb(chat_id, res[1], res[2], res[3], new_del))
+    limit, time_sec, action = res[1], res[2], res[3]
+    punishment_text = action.upper()
+    if new_del:
+        punishment_text += " + DELETION"
+    
+    try:
+        await cb.message.edit_caption(
+            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
+            reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, new_del), parse_mode="Markdown"
+        )
+    except Exception:
+        await cb.message.edit_reply_markup(reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, new_del))
+    
     await cb.answer("Delete option updated!")
 
 # Link Protection Toggle
@@ -532,7 +731,7 @@ async def cb_lnk_toggle(cb: types.CallbackQuery):
 async def cb_other_submenus(cb: types.CallbackQuery):
     await cb.answer("Setting updated successfully!", show_alert=False)
 
-# --- Direct Group Moderation Commands ---
+# --- Direct Group Moderation Commands (/ban, /mute, /warn, etc.) ---
 @dp.message(Command("userid"))
 async def cmd_userid(msg: types.Message):
     if msg.chat.type not in ["group", "supergroup"]:
@@ -551,14 +750,33 @@ async def cmd_ban(msg: types.Message):
         await msg.reply("Please reply to a user's message to ban.")
         return
     target_user = msg.reply_to_message.from_user
-    try:
-        await bot.ban_chat_member(chat_id=msg.chat.id, user_id=target_user.id)
-        appeal_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Submit Appeal", url=f"https://t.me/8912103286_bot?start=appeal_{msg.chat.id}")]
-        ])
-        await msg.answer(f"{target_user.mention_html()} has been successfully banned!", reply_markup=appeal_kb, parse_mode="HTML")
-    except Exception as e:
-        await msg.reply(f"Error banning user: {e}")
+    await handle_user_violation(bot, msg.chat.id, target_user, "ban")
+
+@dp.message(Command("mute"))
+async def cmd_mute(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
+    if not await is_user_admin(msg):
+        await msg.reply("This command is only for group admins!")
+        return
+    if not msg.reply_to_message:
+        await msg.reply("Please reply to a user's message to mute.")
+        return
+    target_user = msg.reply_to_message.from_user
+    await handle_user_violation(bot, msg.chat.id, target_user, "mute")
+
+@dp.message(Command("warn"))
+async def cmd_warn(msg: types.Message):
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
+    if not await is_user_admin(msg):
+        await msg.reply("This command is only for group admins!")
+        return
+    if not msg.reply_to_message:
+        await msg.reply("Please reply to a user's message to warn.")
+        return
+    target_user = msg.reply_to_message.from_user
+    await handle_user_violation(bot, msg.chat.id, target_user, "warn")
 
 @dp.message(Command("unban"))
 async def cmd_unban(msg: types.Message):
@@ -576,27 +794,6 @@ async def cmd_unban(msg: types.Message):
         await msg.reply(f"{target_user.mention_html()} has been unbanned!", parse_mode="HTML")
     except Exception as e:
         await msg.reply(f"Error unbanning user: {e}")
-
-@dp.message(Command("mute"))
-async def cmd_mute(msg: types.Message):
-    if msg.chat.type not in ["group", "supergroup"]:
-        return
-    if not await is_user_admin(msg):
-        await msg.reply("This command is only for group admins!")
-        return
-    if not msg.reply_to_message:
-        await msg.reply("Please reply to a user's message to mute.")
-        return
-    target_user = msg.reply_to_message.from_user
-    try:
-        permissions = types.ChatPermissions(can_send_messages=False)
-        await bot.restrict_chat_member(chat_id=msg.chat.id, user_id=target_user.id, permissions=permissions)
-        appeal_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Submit Appeal", url=f"https://t.me/8912103286_bot?start=appeal_{msg.chat.id}")]
-        ])
-        await msg.answer(f"{target_user.mention_html()} has been muted!", reply_markup=appeal_kb, parse_mode="HTML")
-    except Exception as e:
-        await msg.reply(f"Error muting user: {e}")
 
 @dp.message(Command("unmute"))
 async def cmd_unmute(msg: types.Message):
@@ -829,10 +1026,10 @@ async def group_message_processor(msg: types.Message):
     # 3. Antiflood Logic
     if not is_admin:
         async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del, mute_duration FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
                 af_res = await cursor.fetchone()
         if af_res and af_res[2] != "off":
-            limit, time_win, action, del_flag, mute_dur = af_res
+            limit, time_win, action, del_flag = af_res
             now = time.time()
             if chat_id not in flood_tracker:
                 flood_tracker[chat_id] = {}
@@ -850,22 +1047,7 @@ async def group_message_processor(msg: types.Message):
                 except Exception:
                     pass
 
-                try:
-                    if action == "warn":
-                        await msg.answer(f"{user.mention_html()} has been warned for flooding!", parse_mode="HTML")
-                    elif action == "kick":
-                        await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-                        await bot.unban_chat_member(chat_id=chat_id, user_id=user.id)
-                        await msg.answer(f"{user.mention_html()} has been kicked for flooding!", parse_mode="HTML")
-                    elif action == "mute":
-                        permissions = types.ChatPermissions(can_send_messages=False)
-                        await bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=permissions, until_date=int(now + mute_dur))
-                        await msg.answer(f"{user.mention_html()} has been muted for flooding!", parse_mode="HTML")
-                    elif action == "ban":
-                        await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-                        await msg.answer(f"{user.mention_html()} has been banned for flooding!", parse_mode="HTML")
-                except Exception:
-                    pass
+                await handle_user_violation(bot, chat_id, user, action)
                 return
 
     # Message Counter Update
@@ -894,7 +1076,8 @@ async def main():
         BotCommand(command="unban", description="Unban user via reply"),
         BotCommand(command="mute", description="Mute user via reply"),
         BotCommand(command="unmute", description="Unmute user via reply"),
-        BotCommand(command="userid", description="Get user ID")
+        BotCommand(command="userid", description="Get user ID"),
+        BotCommand(command="warn", description="Warn user via reply")
     ]
     await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
     

@@ -23,7 +23,6 @@ dp = Dispatcher()
 
 PROFANITY_WORDS = ["gali", "abuse", "mc", "bc", "bhadve", "randi", "fuck", "shit", "tmkc", "tmkl"]
 
-# In-memory Antiflood tracker: {chat_id: {user_id: [timestamp1, timestamp2, ...]}}
 flood_tracker = {}
 
 # --- Web Server & Health Check ---
@@ -230,11 +229,18 @@ def group_settings_menu_kb(chat_id: int):
     ])
 
 def anti_flood_menu_kb(chat_id: int, limit=3, time_sec=2, action="warn", del_msg=1):
+    off_check = "✅ " if action == "off" else ""
+    warn_check = "✅ " if action == "warn" else ""
+    kick_check = "✅ " if action == "kick" else ""
+    mute_check = "✅ " if action == "mute" else ""
+    ban_check = "✅ " if action == "ban" else ""
+    del_check = "✅" if del_msg else "❌"
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Messages", callback_data=f"af_msgs_{chat_id}"), InlineKeyboardButton(text="Time", callback_data=f"af_time_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='off':_}Off", callback_data=f"af_act_off_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='warn':_}Warn", callback_data=f"af_act_warn_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='kick':_}Kick", callback_data=f"af_act_kick_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='mute':_}Mute", callback_data=f"af_act_mute_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='ban':_}Ban", callback_data=f"af_act_ban_{chat_id}")],
-        [InlineKeyboardButton(text=f"Delete Messages {'✅' if del_msg else '❌'}", callback_data=f"af_del_{chat_id}")],
+        [InlineKeyboardButton(text=f"{off_check}Off", callback_data=f"af_act_off_{chat_id}"), InlineKeyboardButton(text=f"{warn_check}Warn", callback_data=f"af_act_warn_{chat_id}")],
+        [InlineKeyboardButton(text=f"{kick_check}Kick", callback_data=f"af_act_kick_{chat_id}"), InlineKeyboardButton(text=f"{mute_check}Mute", callback_data=f"af_act_mute_{chat_id}"), InlineKeyboardButton(text=f"{ban_check}Ban", callback_data=f"af_act_ban_{chat_id}")],
+        [InlineKeyboardButton(text=f"Delete Messages {del_check}", callback_data=f"af_del_{chat_id}")],
         [InlineKeyboardButton(text="Set mute duration", callback_data=f"af_mdur_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
@@ -274,9 +280,12 @@ def link_protection_menu_kb(chat_id: int, status: int):
     ])
 
 def masked_users_menu_kb(chat_id: int, status: int, del_msg: int):
+    off_c = "✅" if not status else ""
+    on_c = "✅" if status else ""
+    del_c = "✅" if del_msg else "❌"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"Turn off {'✅' if not status else ''}", callback_data=f"mu_off_{chat_id}"), InlineKeyboardButton(text=f"Turn on {'✅' if status else ''}", callback_data=f"mu_on_{chat_id}")],
-        [InlineKeyboardButton(text=f"Delete Messages {'✅' if del_msg else '❌'}", callback_data=f"mu_del_{chat_id}")],
+        [InlineKeyboardButton(text=f"Turn off {off_c}", callback_data=f"mu_off_{chat_id}"), InlineKeyboardButton(text=f"Turn on {on_c}", callback_data=f"mu_on_{chat_id}")],
+        [InlineKeyboardButton(text=f"Delete Messages {del_c}", callback_data=f"mu_del_{chat_id}")],
         [InlineKeyboardButton(text="Exceptions", callback_data=f"mu_exc_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
@@ -830,12 +839,11 @@ async def group_message_processor(msg: types.Message):
             if user.id not in flood_tracker[chat_id]:
                 flood_tracker[chat_id][user.id] = []
             
-            # Filter timestamps within time window
             flood_tracker[chat_id][user.id] = [t for t in flood_tracker[chat_id][user.id] if now - t < time_win]
             flood_tracker[chat_id][user.id].append(now)
 
             if len(flood_tracker[chat_id][user.id]) >= limit:
-                flood_tracker[chat_id][user.id] = [] # Reset
+                flood_tracker[chat_id][user.id] = []
                 try:
                     if del_flag:
                         await msg.delete()
@@ -869,13 +877,11 @@ async def main():
     await start_web_server()
     asyncio.create_task(keep_alive())
     
-    # Set private command scope for start
     await bot.set_my_commands(
         [BotCommand(command="start", description="Open Main Menu")],
         scope=BotCommandScopeDefault()
     )
     
-    # Set group commands scope so group commands show properly in groups
     group_commands = [
         BotCommand(command="today", description="Today top chatters"),
         BotCommand(command="weekly", description="Weekly top chatters"),

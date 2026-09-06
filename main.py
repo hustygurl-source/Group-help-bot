@@ -2,6 +2,7 @@ import asyncio
 import os
 import random
 import io
+import time
 import aiosqlite
 from PIL import Image, ImageDraw, ImageFont
 from aiohttp import web, ClientSession
@@ -9,7 +10,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile, BotCommandScopeDefault
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BufferedInputFile, BotCommandScopeDefault, BotCommandScopeAllGroupChats
 
 # --- Configuration ---
 BOT_TOKEN = "8912103286:AAGBQTFYrTRFMGa6tEW5UHMtt3qCR6KcN8w"
@@ -21,6 +22,9 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 PROFANITY_WORDS = ["gali", "abuse", "mc", "bc", "bhadve", "randi", "fuck", "shit", "tmkc", "tmkl"]
+
+# In-memory Antiflood tracker: {chat_id: {user_id: [timestamp1, timestamp2, ...]}}
+flood_tracker = {}
 
 # --- Web Server & Health Check ---
 async def handle_ping(request):
@@ -71,66 +75,15 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS managed_groups (
             chat_id INTEGER PRIMARY KEY,
             title TEXT,
-            antiflood INTEGER DEFAULT 1,
+            antiflood_action TEXT DEFAULT 'warn',
             flood_limit INTEGER DEFAULT 3,
             flood_time INTEGER DEFAULT 2,
-            flood_action TEXT DEFAULT 'mute',
             flood_del INTEGER DEFAULT 1,
-            mute_duration INTEGER DEFAULT 10,
+            mute_duration INTEGER DEFAULT 600,
             link_protection INTEGER DEFAULT 0,
             masked_users INTEGER DEFAULT 1,
             masked_del INTEGER DEFAULT 1,
             welcome_status INTEGER DEFAULT 0
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS group_warnings (
-            chat_id INTEGER,
-            action TEXT DEFAULT 'mute',
-            max_warns INTEGER DEFAULT 3,
-            mute_duration INTEGER DEFAULT 60,
-            PRIMARY KEY (chat_id)
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words_config (
-            chat_id INTEGER PRIMARY KEY,
-            action TEXT DEFAULT 'off',
-            delete_msgs INTEGER DEFAULT 1
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words_list (
-            chat_id INTEGER,
-            word TEXT,
-            PRIMARY KEY (chat_id, word)
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS recurring_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            message_text TEXT,
-            interval_seconds INTEGER DEFAULT 3600,
-            is_active INTEGER DEFAULT 1
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS custom_commands (
-            chat_id INTEGER,
-            trigger_word TEXT,
-            reply_text TEXT,
-            PRIMARY KEY (chat_id, trigger_word)
-        );
-        """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS user_incline_buttons (
-            chat_id INTEGER,
-            trigger_word TEXT,
-            reply_text TEXT,
-            button_name TEXT,
-            button_url TEXT,
-            PRIMARY KEY (chat_id, trigger_word, button_name)
         );
         """)
         await db.execute("""
@@ -178,7 +131,7 @@ async def is_claimed_admin(user_id: int) -> bool:
             row = await cursor.fetchone()
             return row is not None
 
-# --- Custom Leaderboard Image Generation ---
+# --- PIL Image Generation for Leaderboards ---
 async def generate_top3_card(title: str, top_users: list):
     img = Image.new("RGB", (700, 350), color=(15, 15, 22))
     draw = ImageDraw.Draw(img)
@@ -237,10 +190,6 @@ async def generate_full_leaderboard_card(title: str, top_users: list):
 class BotStates(StatesGroup):
     admin_pass = State()
     waiting_for_appeal_text = State()
-    adding_recurring_msg = State()
-    setting_custom_cmd = State()
-    setting_user_cmd = State()
-    setting_incline_btn = State()
 
 # --- Keyboards ---
 def user_start_kb():
@@ -280,39 +229,43 @@ def group_settings_menu_kb(chat_id: int):
         [InlineKeyboardButton(text="Back", callback_data="admin_manage_groups"), InlineKeyboardButton(text="Close", callback_data="close_menu")]
     ])
 
-def anti_flood_menu_kb(chat_id: int, limit=3, time_sec=2, action="mute", del_msg=1):
-    action_labels = {"off": "Off", "warn": "Warn", "kick": "Kick", "mute": "Mute", "ban": "Ban"}
+def anti_flood_menu_kb(chat_id: int, limit=3, time_sec=2, action="warn", del_msg=1):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"Messages: {limit}", callback_data=f"af_msgs_{chat_id}"), InlineKeyboardButton(text=f"Time: {time_sec}s", callback_data=f"af_time_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='off':_}Off", callback_data=f"af_setact_off_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='warn':_}Warn", callback_data=f"af_setact_warn_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='kick':_}Kick", callback_data=f"af_setact_kick_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='mute':_}Mute", callback_data=f"af_setact_mute_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='ban':_}Ban", callback_data=f"af_setact_ban_{chat_id}")],
+        [InlineKeyboardButton(text="Messages", callback_data=f"af_msgs_{chat_id}"), InlineKeyboardButton(text="Time", callback_data=f"af_time_{chat_id}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if action=='off':_}Off", callback_data=f"af_act_off_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='warn':_}Warn", callback_data=f"af_act_warn_{chat_id}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if action=='kick':_}Kick", callback_data=f"af_act_kick_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='mute':_}Mute", callback_data=f"af_act_mute_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='ban':_}Ban", callback_data=f"af_act_ban_{chat_id}")],
         [InlineKeyboardButton(text=f"Delete Messages {'✅' if del_msg else '❌'}", callback_data=f"af_del_{chat_id}")],
         [InlineKeyboardButton(text="Set mute duration", callback_data=f"af_mdur_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def warns_menu_kb(chat_id: int, action="mute", max_warns=3):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Warned List", callback_data=f"w_list_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='off':_}Off", callback_data=f"w_act_off_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='kick':_}Kick", callback_data=f"w_act_kick_{chat_id}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if action=='mute':_}Mute", callback_data=f"w_act_mute_{chat_id}"), InlineKeyboardButton(text=f"{'✅ ' if action=='ban':_}Ban", callback_data=f"w_act_ban_{chat_id}")],
-        [InlineKeyboardButton(text="Set mute duration", callback_data=f"w_mdur_{chat_id}")],
-        [
-            InlineKeyboardButton(text=f"{'✅' if max_warns==2 else ''} 2", callback_data=f"w_cnt_2_{chat_id}"),
-            InlineKeyboardButton(text=f"{'✅' if max_warns==3 else ''} 3", callback_data=f"w_cnt_3_{chat_id}"),
-            InlineKeyboardButton(text=f"{'✅' if max_warns==4 else ''} 4", callback_data=f"w_cnt_4_{chat_id}"),
-            InlineKeyboardButton(text=f"{'✅' if max_warns==5 else ''} 5", callback_data=f"w_cnt_5_{chat_id}"),
-            InlineKeyboardButton(text=f"{'✅' if max_warns==6 else ''} 6", callback_data=f"w_cnt_6_{chat_id}")
-        ],
-        [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
-    ])
+def af_messages_selector_kb(chat_id: int):
+    nums = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]
+    buttons = []
+    row = []
+    for n in nums:
+        row.append(InlineKeyboardButton(text=str(n), callback_data=f"af_setmsg_{n}_{chat_id}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Back", callback_data=f"gs_flood_{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def recurring_menu_kb(chat_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Add message", callback_data=f"rc_add_{chat_id}")],
-        [InlineKeyboardButton(text="Active", callback_data=f"rc_toggle_{chat_id}"), InlineKeyboardButton(text="Delete", callback_data=f"rc_del_{chat_id}")],
-        [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
-    ])
+def af_time_selector_kb(chat_id: int):
+    secs = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]
+    buttons = []
+    row = []
+    for s in secs:
+        row.append(InlineKeyboardButton(text=str(s), callback_data=f"af_settime_{s}_{chat_id}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Back", callback_data=f"gs_flood_{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def link_protection_menu_kb(chat_id: int, status: int):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -375,7 +328,7 @@ async def process_admin_key(msg: types.Message, state: FSMContext):
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
-            caption="Manage Group Settings\nSelect an option below:",
+            caption="Manage Groups\nSelect an option below:",
             reply_markup=main_admin_panel_kb(),
             parse_mode="Markdown"
         )
@@ -392,7 +345,7 @@ async def cmd_setting(msg: types.Message):
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         await msg.answer_photo(
             photo=banner_url,
-            caption="Manage Group Settings\nSelect an option below:",
+            caption="Manage Groups\nSelect an option below:",
             reply_markup=main_admin_panel_kb(),
             parse_mode="Markdown"
         )
@@ -408,12 +361,12 @@ async def cb_manage_groups(cb: types.CallbackQuery):
         return
         
     await cb.message.edit_caption(
-        caption="Manage Group Settings\nSelect the group whose settings you want to change:",
+        caption="Manage Groups\nSelect the group whose settings you want to change:",
         reply_markup=group_selector_kb(groups),
         parse_mode="Markdown"
     )
 
-@dp.callback_query(F.data.startswith("select_group_"))
+@dp.callback_query(F.data.startswith("select_group_") & ~F.data.contains("gs_"))
 async def cb_select_group_settings(cb: types.CallbackQuery):
     chat_id = int(cb.data.split("_")[2])
     async with aiosqlite.connect(DB_NAME) as db:
@@ -435,21 +388,12 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
     
     if action == "flood":
         async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT flood_limit, flood_time, flood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
                 res = await cursor.fetchone()
-        limit, time_sec, act, del_m = res if res else (3, 2, "mute", 1)
+        limit, time_sec, act, del_m = res if res else (3, 2, "warn", 1)
         await cb.message.edit_caption(
-            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent within {time_sec} seconds.\nPunishment: {act.upper()} + Deletion: {'Yes' if del_m else 'No'}",
+            caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
             reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
-        )
-    elif action == "warns":
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT action, max_warns FROM group_warnings WHERE chat_id = ?", (chat_id,)) as cursor:
-                res = await cursor.fetchone()
-        act, max_w = res if res else ("mute", 3)
-        await cb.message.edit_caption(
-            caption=f"User warnings\nMax warns allowed: {max_w}\nPunishment: {act.upper()}",
-            reply_markup=warns_menu_kb(chat_id, act, max_w), parse_mode="Markdown"
         )
     elif action == "link":
         async with aiosqlite.connect(DB_NAME) as db:
@@ -459,11 +403,6 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
         await cb.message.edit_caption(
             caption=f"Link Protection\nAuto-delete all links sent by non-admin users.\nStatus: {'Turned On' if status else 'Turned Off'}",
             reply_markup=link_protection_menu_kb(chat_id, status), parse_mode="Markdown"
-        )
-    elif action == "recurring":
-        await cb.message.edit_caption(
-            caption="Recurring messages\nFrom this menu you can set messages that will be sent repeatedly to the group.",
-            reply_markup=recurring_menu_kb(chat_id), parse_mode="Markdown"
         )
     elif action == "masked":
         async with aiosqlite.connect(DB_NAME) as db:
@@ -482,25 +421,84 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
     else:
         await cb.answer(f"Opening {action.upper()} settings...", show_alert=False)
 
-# Antiflood sub-handlers
-@dp.callback_query(F.data.startswith("af_setact_"))
-async def cb_af_setact(cb: types.CallbackQuery):
-    _, _, act, chat_id_str = cb.data.split("_")
-    chat_id = int(chat_id_str)
+# Antiflood sub-menu interactions
+@dp.callback_query(F.data.startswith("af_msgs_"))
+async def cb_af_msgs(cb: types.CallbackQuery):
+    chat_id = int(cb.data.split("_")[2])
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE managed_groups SET flood_action = ? WHERE chat_id = ?", (act, chat_id))
+        async with db.execute("SELECT flood_limit, flood_time FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    limit, time_sec = res if res else (3, 2)
+    await cb.message.edit_caption(
+        caption=f"From here you can select the maximum amount of sendable messages in the time interval.\nCurrently, the antiflood trigger when {limit} messages are sent in {time_sec} seconds.",
+        reply_markup=af_messages_selector_kb(chat_id), parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("af_setmsg_"))
+async def cb_af_setmsg(cb: types.CallbackQuery):
+    parts = cb.data.split("_")
+    new_limit = int(parts[2])
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE managed_groups SET flood_limit = ? WHERE chat_id = ?", (new_limit, chat_id))
         await db.commit()
-        async with db.execute("SELECT flood_limit, flood_time, flood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+        async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    limit, time_sec, act, del_m = res
+    await cb.message.edit_caption(
+        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
+        reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
+    )
+    await cb.answer("Message limit updated!")
+
+@dp.callback_query(F.data.startswith("af_time_"))
+async def cb_af_time(cb: types.CallbackQuery):
+    chat_id = int(cb.data.split("_")[2])
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT flood_limit, flood_time FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    limit, time_sec = res if res else (3, 2)
+    await cb.message.edit_caption(
+        caption=f"From here you can select the time interval considered to calculate the antiflood.\nCurrently, the antiflood trigger when {limit} messages are sent in {time_sec} seconds.",
+        reply_markup=af_time_selector_kb(chat_id), parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("af_settime_"))
+async def cb_af_settime(cb: types.CallbackQuery):
+    parts = cb.data.split("_")
+    new_time = int(parts[2])
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE managed_groups SET flood_time = ? WHERE chat_id = ?", (new_time, chat_id))
+        await db.commit()
+        async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    limit, time_sec, act, del_m = res
+    await cb.message.edit_caption(
+        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {act.upper()}",
+        reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, act, del_m), parse_mode="Markdown"
+    )
+    await cb.answer("Time interval updated!")
+
+@dp.callback_query(F.data.startswith("af_act_"))
+async def cb_af_act(cb: types.CallbackQuery):
+    parts = cb.data.split("_")
+    act = parts[2]
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE managed_groups SET antiflood_action = ? WHERE chat_id = ?", (act, chat_id))
+        await db.commit()
+        async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
     limit, time_sec, action, del_m = res
     await cb.message.edit_reply_markup(reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, del_m))
-    await cb.answer("Punishment updated!")
+    await cb.answer(f"Punishment set to {act.upper()}!")
 
 @dp.callback_query(F.data.startswith("af_del_"))
 async def cb_af_del(cb: types.CallbackQuery):
     chat_id = int(cb.data.split("_")[2])
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT flood_del, flood_limit, flood_time, flood_action FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+        async with db.execute("SELECT flood_del, flood_limit, flood_time, antiflood_action FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
         new_del = 0 if res[0] else 1
         await db.execute("UPDATE managed_groups SET flood_del = ? WHERE chat_id = ?", (new_del, chat_id))
@@ -521,11 +519,11 @@ async def cb_lnk_toggle(cb: types.CallbackQuery):
     await cb.message.edit_reply_markup(reply_markup=link_protection_menu_kb(chat_id, new_status))
     await cb.answer(f"Link protection turned {'on' if new_status else 'off'}!")
 
-@dp.callback_query(F.data.startswith(("w_", "rc_", "mu_", "pc_")))
+@dp.callback_query(F.data.startswith(("mu_", "pc_")))
 async def cb_other_submenus(cb: types.CallbackQuery):
     await cb.answer("Setting updated successfully!", show_alert=False)
 
-# --- Direct Group Moderation Commands & Protection Logic ---
+# --- Direct Group Moderation Commands ---
 @dp.message(Command("userid"))
 async def cmd_userid(msg: types.Message):
     if msg.chat.type not in ["group", "supergroup"]:
@@ -819,6 +817,49 @@ async def group_message_processor(msg: types.Message):
                     pass
                 return
 
+    # 3. Antiflood Logic
+    if not is_admin:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del, mute_duration FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+                af_res = await cursor.fetchone()
+        if af_res and af_res[2] != "off":
+            limit, time_win, action, del_flag, mute_dur = af_res
+            now = time.time()
+            if chat_id not in flood_tracker:
+                flood_tracker[chat_id] = {}
+            if user.id not in flood_tracker[chat_id]:
+                flood_tracker[chat_id][user.id] = []
+            
+            # Filter timestamps within time window
+            flood_tracker[chat_id][user.id] = [t for t in flood_tracker[chat_id][user.id] if now - t < time_win]
+            flood_tracker[chat_id][user.id].append(now)
+
+            if len(flood_tracker[chat_id][user.id]) >= limit:
+                flood_tracker[chat_id][user.id] = [] # Reset
+                try:
+                    if del_flag:
+                        await msg.delete()
+                except Exception:
+                    pass
+
+                try:
+                    if action == "warn":
+                        await msg.answer(f"{user.mention_html()} has been warned for flooding!", parse_mode="HTML")
+                    elif action == "kick":
+                        await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+                        await bot.unban_chat_member(chat_id=chat_id, user_id=user.id)
+                        await msg.answer(f"{user.mention_html()} has been kicked for flooding!", parse_mode="HTML")
+                    elif action == "mute":
+                        permissions = types.ChatPermissions(can_send_messages=False)
+                        await bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=permissions, until_date=int(now + mute_dur))
+                        await msg.answer(f"{user.mention_html()} has been muted for flooding!", parse_mode="HTML")
+                    elif action == "ban":
+                        await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+                        await msg.answer(f"{user.mention_html()} has been banned for flooding!", parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+
     # Message Counter Update
     await add_msg_count(user.id, chat_id, user.username or "", user.first_name)
 
@@ -828,10 +869,28 @@ async def main():
     await start_web_server()
     asyncio.create_task(keep_alive())
     
+    # Set private command scope for start
     await bot.set_my_commands(
         [BotCommand(command="start", description="Open Main Menu")],
         scope=BotCommandScopeDefault()
     )
+    
+    # Set group commands scope so group commands show properly in groups
+    group_commands = [
+        BotCommand(command="today", description="Today top chatters"),
+        BotCommand(command="weekly", description="Weekly top chatters"),
+        BotCommand(command="lead", description="All-time leaderboard"),
+        BotCommand(command="kundli", description="Astrology prediction"),
+        BotCommand(command="ship", description="Compatibility meter"),
+        BotCommand(command="report", description="Report message"),
+        BotCommand(command="admin", description="Tag all admins"),
+        BotCommand(command="ban", description="Ban user via reply"),
+        BotCommand(command="unban", description="Unban user via reply"),
+        BotCommand(command="mute", description="Mute user via reply"),
+        BotCommand(command="unmute", description="Unmute user via reply"),
+        BotCommand(command="userid", description="Get user ID")
+    ]
+    await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
     
     await dp.start_polling(bot)
 

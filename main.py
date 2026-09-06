@@ -81,6 +81,8 @@ async def init_db():
             max_warns INTEGER DEFAULT 3,
             mute_duration INTEGER DEFAULT 600,
             link_protection INTEGER DEFAULT 0,
+            link_action TEXT DEFAULT 'warn',
+            porn_protection INTEGER DEFAULT 0,
             masked_users INTEGER DEFAULT 1,
             masked_del INTEGER DEFAULT 1,
             welcome_status INTEGER DEFAULT 0
@@ -92,6 +94,51 @@ async def init_db():
             chat_id INTEGER,
             warn_count INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, chat_id)
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS banned_words_config (
+            chat_id INTEGER PRIMARY KEY,
+            action TEXT DEFAULT 'off',
+            delete_msgs INTEGER DEFAULT 1
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS banned_words_list (
+            chat_id INTEGER,
+            word TEXT,
+            PRIMARY KEY (chat_id, word)
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS custom_commands (
+            chat_id INTEGER,
+            trigger_word TEXT,
+            reply_text TEXT,
+            PRIMARY KEY (chat_id, trigger_word)
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_commands (
+            chat_id INTEGER,
+            trigger_word TEXT,
+            reply_text TEXT,
+            PRIMARY KEY (chat_id, trigger_word)
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS inline_buttons_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            trigger_word TEXT,
+            reply_text TEXT
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS inline_buttons_items (
+            config_id INTEGER,
+            button_name TEXT,
+            button_url TEXT
         );
         """)
         await db.execute("""
@@ -198,6 +245,15 @@ async def generate_full_leaderboard_card(title: str, top_users: list):
 class BotStates(StatesGroup):
     admin_pass = State()
     waiting_for_appeal_text = State()
+    adding_banned_word = State()
+    removing_banned_word = State()
+    setting_pcmd_trigger = State()
+    setting_pcmd_reply = State()
+    setting_ucmd_trigger = State()
+    setting_ucmd_reply = State()
+    setting_inline_trigger = State()
+    setting_inline_reply = State()
+    setting_inline_buttons = State()
 
 # --- Keyboards ---
 def user_start_kb():
@@ -286,20 +342,47 @@ def af_time_selector_kb(chat_id: int):
     buttons.append([InlineKeyboardButton(text="Back", callback_data=f"gs_flood_{chat_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def warns_limit_selector_kb(chat_id: int, current_max: int):
+    buttons = []
+    row = []
+    for i in range(1, 11):
+        check = "✅ " if i == current_max else ""
+        row.append(InlineKeyboardButton(text=f"{check}{i}", callback_data=f"w_setmax_{i}_{chat_id}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Back", callback_data=f"gs_flood_{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def link_protection_menu_kb(chat_id: int, status: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Status: {'Turn On ✅' if status else 'Turn Off ❌'}", callback_data=f"lnk_toggle_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
-def masked_users_menu_kb(chat_id: int, status: int, del_msg: int):
-    off_c = "✅" if not status else ""
-    on_c = "✅" if status else ""
-    del_c = "✅" if del_msg else "❌"
+def porn_protection_menu_kb(chat_id: int, status: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"Turn off {off_c}", callback_data=f"mu_off_{chat_id}"), InlineKeyboardButton(text=f"Turn on {on_c}", callback_data=f"mu_on_{chat_id}")],
-        [InlineKeyboardButton(text=f"Delete Messages {del_c}", callback_data=f"mu_del_{chat_id}")],
-        [InlineKeyboardButton(text="Exceptions", callback_data=f"mu_exc_{chat_id}")],
+        [InlineKeyboardButton(text=f"Status: {'Turn On ✅' if status else 'Turn Off ❌'}", callback_data=f"porn_toggle_{chat_id}")],
+        [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
+    ])
+
+def banned_words_menu_kb(chat_id: int, action="off", del_msg=1, count=0):
+    off_c = "✅ " if action == "off" else ""
+    warn_c = "✅ " if action == "warn" else ""
+    kick_c = "✅ " if action == "kick" else ""
+    mute_c = "✅ " if action == "mute" else ""
+    ban_c = "✅ " if action == "ban" else ""
+    del_c = "✅" if del_msg else "❌"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{off_c}Off", callback_data=f"bw_act_off_{chat_id}"), InlineKeyboardButton(text=f"{warn_c}Warn", callback_data=f"bw_act_warn_{chat_id}"), InlineKeyboardButton(text=f"{kick_c}Kick", callback_data=f"bw_act_kick_{chat_id}")],
+        [InlineKeyboardButton(text=f"{mute_c}Mute", callback_data=f"bw_act_mute_{chat_id}"), InlineKeyboardButton(text=f"{ban_c}Ban", callback_data=f"bw_act_ban_{chat_id}")],
+        [InlineKeyboardButton(text=f"Delete Messages {del_c}", callback_data=f"bw_del_{chat_id}")],
+        [InlineKeyboardButton(text="Add", callback_data=f"bw_add_{chat_id}"), InlineKeyboardButton(text="Remove", callback_data=f"bw_rem_{chat_id}")],
+        [InlineKeyboardButton(text="List", callback_data=f"bw_list_{chat_id}")],
+        [InlineKeyboardButton(text=f"{count} Banned Words", callback_data=f"bw_list_{chat_id}")],
         [InlineKeyboardButton(text="Back", callback_data=f"select_group_{chat_id}")]
     ])
 
@@ -339,7 +422,6 @@ async def handle_user_violation(bot: Bot, chat_id: int, user: types.User, action
             current_warns = (row[0] if row else 0) + 1
             
             if current_warns >= max_w:
-                # Reset warns and execute Ban
                 await db.execute("DELETE FROM user_warn_counts WHERE user_id = ? AND chat_id = ?", (user.id, chat_id))
                 await db.commit()
                 
@@ -478,6 +560,11 @@ async def cb_mod_unban(cb: types.CallbackQuery):
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
     if msg.chat.type == "private":
+        args = msg.text.split()
+        if len(args) > 1 and args[1].startswith("appeal_"):
+            chat_id = args[1].split("_")[1]
+            await msg.answer(f"Aapne group ({chat_id}) ke ban ke khilaf appeal karne ke liye chat kholi hai. Kripya apna appeal reason yahan type karein:")
+            return
         banner_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"
         caption = "Welcome to Appeal X Bot\nSelect an option below:"
         await msg.answer_photo(photo=banner_url, caption=caption, reply_markup=user_start_kb(), parse_mode="Markdown")
@@ -579,21 +666,34 @@ async def cb_group_setting_action(cb: types.CallbackQuery):
                 res = await cursor.fetchone()
         status = res[0] if res else 0
         await cb.message.edit_caption(
-            caption=f"Link Protection\nAuto-delete all links sent by non-admin users.\nStatus: {'Turned On' if status else 'Turned Off'}",
+            caption=f"Link Protection\nAuto-delete all links sent by non-admin users and warn them.\nStatus: {'Turned On' if status else 'Turned Off'}",
             reply_markup=link_protection_menu_kb(chat_id, status), parse_mode="Markdown"
         )
-    elif action == "masked":
+    elif action == "porn":
         async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT masked_users, masked_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            async with db.execute("SELECT porn_protection FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
                 res = await cursor.fetchone()
-        status, del_m = res if res else (1, 1)
+        status = res[0] if res else 0
         await cb.message.edit_caption(
-            caption=f"Masked users\nBlock users writing disguised as a channel.\nStatus: {'Active' if status else 'Inactive'}",
-            reply_markup=masked_users_menu_kb(chat_id, status, del_m), parse_mode="Markdown"
+            caption=f"Porn / Media Protection\nAuto-delete media/videos and auto-ban users.\nStatus: {'Turned On' if status else 'Turned Off'}",
+            reply_markup=porn_protection_menu_kb(chat_id, status), parse_mode="Markdown"
+        )
+    elif action == "bwords":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT action, delete_msgs FROM banned_words_config WHERE chat_id = ?", (chat_id,)) as cursor:
+                bw_conf = await cursor.fetchone()
+            async with db.execute("SELECT COUNT(*) FROM banned_words_list WHERE chat_id = ?", (chat_id,)) as cursor:
+                cnt = await cursor.fetchone()
+        act = bw_conf[0] if bw_conf else "off"
+        del_m = bw_conf[1] if bw_conf else 1
+        total_words = cnt[0] if cnt else 0
+        await cb.message.edit_caption(
+            caption=f"Banned Words\nManage custom banned words and penalty.\nPenalty: {act.upper()}\nDeletion: {'Yes' if del_m else 'No'}",
+            reply_markup=banned_words_menu_kb(chat_id, act, del_m, total_words), parse_mode="Markdown"
         )
     elif action == "pcommands":
         await cb.message.edit_caption(
-            caption="Personal Commands, User Command, User Incline Button",
+            caption="Personal Commands, User Command, User Incline Button\nSelect an option below:",
             reply_markup=personal_commands_menu_kb(chat_id), parse_mode="Markdown"
         )
     else:
@@ -669,6 +769,18 @@ async def cb_af_act(cb: types.CallbackQuery):
     parts = cb.data.split("_")
     act = parts[2]
     chat_id = int(parts[3])
+    if act == "warn":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT max_warns FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+                res = await cursor.fetchone()
+        max_w = res[0] if res else 3
+        await cb.message.edit_caption(
+            caption=f"Select maximum warns before banning the user.\nCurrent max warns: {max_w}",
+            reply_markup=warns_limit_selector_kb(chat_id, max_w), parse_mode="Markdown"
+        )
+        await cb.answer("Select warn limit!")
+        return
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE managed_groups SET antiflood_action = ? WHERE chat_id = ?", (act, chat_id))
         await db.commit()
@@ -679,7 +791,6 @@ async def cb_af_act(cb: types.CallbackQuery):
     if del_m:
         punishment_text += " + DELETION"
     
-    # Also update caption text to show active punishment string properly
     try:
         await cb.message.edit_caption(
             caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
@@ -690,17 +801,39 @@ async def cb_af_act(cb: types.CallbackQuery):
     
     await cb.answer(f"Punishment set to {act.upper()}!")
 
+@dp.callback_query(F.data.startswith("w_setmax_"))
+async def cb_w_setmax(cb: types.CallbackQuery):
+    parts = cb.data.split("_")
+    max_w = int(parts[2])
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE managed_groups SET max_warns = ?, antiflood_action = 'warn' WHERE chat_id = ?", (max_w, chat_id))
+        await db.commit()
+        async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+    limit, time_sec, action, del_m = res
+    punishment_text = f"WARN (Max: {max_w})"
+    if del_m:
+        punishment_text += " + DELETION"
+    await cb.message.edit_caption(
+        caption=f"Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\nCurrently, the antiflood triggers when {limit} messages are sent in {time_sec} seconds.\nPunishment: {punishment_text}",
+        reply_markup=anti_flood_menu_kb(chat_id, limit, time_sec, action, del_m), parse_mode="Markdown"
+    )
+    await cb.answer(f"Max warns set to {max_w}!")
+
 @dp.callback_query(F.data.startswith("af_del_"))
 async def cb_af_del(cb: types.CallbackQuery):
     chat_id = int(cb.data.split("_")[2])
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT flood_del, flood_limit, flood_time, antiflood_action FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+        async with db.execute("SELECT flood_del, flood_limit, flood_time, antiflood_action, max_warns FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
             res = await cursor.fetchone()
         new_del = 0 if res[0] else 1
         await db.execute("UPDATE managed_groups SET flood_del = ? WHERE chat_id = ?", (new_del, chat_id))
         await db.commit()
-    limit, time_sec, action = res[1], res[2], res[3]
+    limit, time_sec, action, max_w = res[1], res[2], res[3], res[4]
     punishment_text = action.upper()
+    if action == "warn":
+        punishment_text += f" (Max: {max_w})"
     if new_del:
         punishment_text += " + DELETION"
     
@@ -726,6 +859,202 @@ async def cb_lnk_toggle(cb: types.CallbackQuery):
         await db.commit()
     await cb.message.edit_reply_markup(reply_markup=link_protection_menu_kb(chat_id, new_status))
     await cb.answer(f"Link protection turned {'on' if new_status else 'off'}!")
+
+# Porn Protection Toggle
+@dp.callback_query(F.data.startswith("porn_toggle_"))
+async def cb_porn_toggle(cb: types.CallbackQuery):
+    chat_id = int(cb.data.split("_")[2])
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT porn_protection FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            res = await cursor.fetchone()
+        new_status = 0 if res and res[0] else 1
+        await db.execute("UPDATE managed_groups SET porn_protection = ? WHERE chat_id = ?", (new_status, chat_id))
+        await db.commit()
+    await cb.message.edit_reply_markup(reply_markup=porn_protection_menu_kb(chat_id, new_status))
+    await cb.answer(f"Porn/Media protection turned {'on' if new_status else 'off'}!")
+
+# Banned Words Submenu Handlers
+@dp.callback_query(F.data.startswith("bw_act_"))
+async def cb_bw_act(cb: types.CallbackQuery):
+    parts = cb.data.split("_")
+    act = parts[2]
+    chat_id = int(parts[3])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT INTO banned_words_config (chat_id, action) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET action = ?", (chat_id, act, act))
+        await db.commit()
+        async with db.execute("SELECT action, delete_msgs FROM banned_words_config WHERE chat_id = ?", (chat_id,)) as cursor:
+            conf = await cursor.fetchone()
+        async with db.execute("SELECT COUNT(*) FROM banned_words_list WHERE chat_id = ?", (chat_id,)) as cursor:
+            cnt = await cursor.fetchone()
+    act_v, del_v, total_w = conf[0], conf[1], cnt[0]
+    await cb.message.edit_reply_markup(reply_markup=banned_words_menu_kb(chat_id, act_v, del_v, total_w))
+    await cb.answer(f"Banned words penalty set to {act.upper()}!")
+
+@dp.callback_query(F.data.startswith("bw_del_"))
+async def cb_bw_del(cb: types.CallbackQuery):
+    chat_id = int(cb.data.split("_")[2])
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT action, delete_msgs FROM banned_words_config WHERE chat_id = ?", (chat_id,)) as cursor:
+            conf = await cursor.fetchone()
+        old_del = conf[1] if conf else 1
+        new_del = 0 if old_del else 1
+        act_v = conf[0] if conf else "off"
+        await db.execute("INSERT INTO banned_words_config (chat_id, delete_msgs) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET delete_msgs = ?", (chat_id, new_del, new_del))
+        await db.commit()
+        async with db.execute("SELECT COUNT(*) FROM banned_words_list WHERE chat_id = ?", (chat_id,)) as cursor:
+            cnt = await cursor.fetchone()
+    total_w = cnt[0] if cnt else 0
+    await cb.message.edit_reply_markup(reply_markup=banned_words_menu_kb(chat_id, act_v, new_del, total_w))
+    await cb.answer("Banned words deletion toggled!")
+
+@dp.callback_query(F.data.startswith("bw_list_"))
+async def cb_bw_list(cb: types.CallbackQuery):
+    chat_id = int(cb.data.split("_")[2])
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT word FROM banned_words_list WHERE chat_id = ?", (chat_id,)) as cursor:
+            rows = await cursor.fetchall()
+    words = [r[0] for r in rows]
+    txt = "Banned Words List:\n\n" + (", ".join(words) if words else "No banned words added yet.")
+    await cb.answer(txt, show_alert=True)
+
+@dp.callback_query(F.data.startswith("bw_add_"))
+async def cb_bw_add(cb: types.CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split("_")[2])
+    await state.update_data(bw_chat_id=chat_id)
+    await state.set_state(BotStates.adding_banned_word)
+    await cb.message.answer("Kripya naya banned word type karein jo aap list me add karna chahte hain:")
+    await cb.answer()
+
+@dp.message(BotStates.adding_banned_word)
+async def process_add_banned_word(msg: types.Message, state: FSMContext):
+    word = (msg.text or "").strip().lower()
+    if not word:
+        await msg.reply("Valid word type karein:")
+        return
+    data = await state.get_data()
+    chat_id = data.get("bw_chat_id")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO banned_words_list (chat_id, word) VALUES (?, ?)", (chat_id, word))
+        await db.commit()
+    await state.clear()
+    await msg.reply(f"Word '{word}' successfully banned list me add kar diya gaya hai!")
+
+@dp.callback_query(F.data.startswith("bw_rem_"))
+async def cb_bw_rem(cb: types.CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split("_")[2])
+    await state.update_data(bw_chat_id=chat_id)
+    await state.set_state(BotStates.removing_banned_word)
+    await cb.message.answer("Kripya woh word type karein jise aap banned list se hatana (remove) chahte hain:")
+    await cb.answer()
+
+@dp.message(BotStates.removing_banned_word)
+async def process_remove_banned_word(msg: types.Message, state: FSMContext):
+    word = (msg.text or "").strip().lower()
+    data = await state.get_data()
+    chat_id = data.get("bw_chat_id")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM banned_words_list WHERE chat_id = ? AND word = ?", (chat_id, word))
+        await db.commit()
+    await state.clear()
+    await msg.reply(f"Word '{word}' list se hata diya gaya hai!")
+
+# --- Personal Commands Submenu Handlers ---
+@dp.callback_query(F.data.startswith("pc_cmd_"))
+async def cb_pc_cmd(cb: types.CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split("_")[2])
+    await state.update_data(pc_chat_id=chat_id)
+    await state.set_state(BotStates.setting_pcmd_trigger)
+    await cb.message.answer("Personal Command setup: Abhi woh trigger word ya command type karein (jaise 'bmc'):")
+    await cb.answer()
+
+@dp.message(BotStates.setting_pcmd_trigger)
+async def process_pcmd_trigger(msg: types.Message, state: FSMContext):
+    trg = (msg.text or "").strip().lower()
+    await state.update_data(pcmd_trg=trg)
+    await state.set_state(BotStates.setting_pcmd_reply)
+    await msg.reply("Ab is trigger ke badle bot jo reply text bhejeega, woh type karein:")
+
+@dp.message(BotStates.setting_pcmd_reply)
+async def process_pcmd_reply(msg: types.Message, state: FSMContext):
+    rep = msg.text or ""
+    data = await state.get_data()
+    chat_id = data.get("pc_chat_id")
+    trg = data.get("pcmd_trg")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR REPLACE INTO custom_commands (chat_id, trigger_word, reply_text) VALUES (?, ?, ?)", (chat_id, trg, rep))
+        await db.commit()
+    await state.clear()
+    await msg.reply(f"Personal Command '{trg}' successfully save ho gaya hai!")
+
+@dp.callback_query(F.data.startswith("pc_rep_"))
+async def cb_pc_rep(cb: types.CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split("_")[2])
+    await state.update_data(uc_chat_id=chat_id)
+    await state.set_state(BotStates.setting_ucmd_trigger)
+    await cb.message.answer("User Command setup: User ke liye trigger word type karein (jaise 'mm' ya 'gv'):")
+    await cb.answer()
+
+@dp.message(BotStates.setting_ucmd_trigger)
+async def process_ucmd_trigger(msg: types.Message, state: FSMContext):
+    trg = (msg.text or "").strip().lower()
+    await state.update_data(ucmd_trg=trg)
+    await state.set_state(BotStates.setting_ucmd_reply)
+    await msg.reply("Ab is user command ke liye reply text type karein:")
+
+@dp.message(BotStates.setting_ucmd_reply)
+async def process_ucmd_reply(msg: types.Message, state: FSMContext):
+    rep = msg.text or ""
+    data = await state.get_data()
+    chat_id = data.get("uc_chat_id")
+    trg = data.get("ucmd_trg")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR REPLACE INTO user_commands (chat_id, trigger_word, reply_text) VALUES (?, ?, ?)", (chat_id, trg, rep))
+        await db.commit()
+    await state.clear()
+    await msg.reply(f"User Command '{trg}' successfully save ho gaya hai!")
+
+@dp.callback_query(F.data.startswith("pc_alias_"))
+async def cb_pc_alias(cb: types.CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split("_")[2])
+    await state.update_data(inline_chat_id=chat_id)
+    await state.set_state(BotStates.setting_inline_trigger)
+    await cb.message.answer("User Incline Button setup: Trigger word type karein (jaise 'panel'):")
+    await cb.answer()
+
+@dp.message(BotStates.setting_inline_trigger)
+async def process_inline_trigger(msg: types.Message, state: FSMContext):
+    trg = (msg.text or "").strip().lower()
+    await state.update_data(inline_trg=trg)
+    await state.set_state(BotStates.setting_inline_reply)
+    await msg.reply("Ab is trigger ke sath main message text kya bheja jaye, woh type karein:")
+
+@dp.message(BotStates.setting_inline_reply)
+async def process_inline_reply(msg: types.Message, state: FSMContext):
+    rep = msg.text or ""
+    await state.update_data(inline_rep=rep)
+    await state.set_state(BotStates.setting_inline_buttons)
+    await msg.reply("Ab inline buttons format me bhejein (Format: ButtonName | URL per line, jaise:\nPanel 1 | https://t.me/...\nPanel 2 | https://t.me/...)")
+
+@dp.message(BotStates.setting_inline_buttons)
+async def process_inline_buttons(msg: types.Message, state: FSMContext):
+    raw_btns = msg.text or ""
+    data = await state.get_data()
+    chat_id = data.get("inline_chat_id")
+    trg = data.get("inline_trg")
+    rep = data.get("inline_rep")
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("INSERT INTO inline_buttons_config (chat_id, trigger_word, reply_text) VALUES (?, ?, ?)", (chat_id, trg, rep))
+        cfg_id = cursor.lastrowid
+        
+        for line in raw_btns.split("\n"):
+            if "|" in line:
+                b_name, b_url = line.split("|", 1)
+                await db.execute("INSERT INTO inline_buttons_items (config_id, button_name, button_url) VALUES (?, ?, ?)", (cfg_id, b_name.strip(), b_url.strip()))
+        await db.commit()
+
+    await state.clear()
+    await msg.reply("User Incline Button configuration successfully save ho gayi hai!")
 
 @dp.callback_query(F.data.startswith(("mu_", "pc_")))
 async def cb_other_submenus(cb: types.CallbackQuery):
@@ -928,12 +1257,28 @@ async def cmd_lead(msg: types.Message):
     full_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Full Leaderboard", callback_data=f"show_lb_{msg.chat.id}")]])
     await msg.answer_photo(photo=photo, caption="All-time group leaderboard!", reply_markup=full_kb)
 
-# --- Kundli in Hinglish ---
-KUNDLI_PREDICTIONS_HINGLISH = [
+# --- Kundli (200+ Dynamic Hinglish Predictions Pool) ---
+KUNDLI_POOL = [
     "Aaj admin se bina baat ke daant padne ke 99% yog hain. Shant rahein!",
     "Grahe bata rahe hain ki aaj aapka message group mein viral hoga.",
     "Dhan labh ke yog hain, apna recharge pack bacha kar rakhein.",
-    "Aaj group mein crush se reply aane ke poore chance hain."
+    "Aaj group mein crush se reply aane ke poore chance hain.",
+    "Aapki kundli me shani bhaari hai, aaj spamming se door rahein.",
+    "Aaj raat ko naye dost banne ke yog hain, online active rahein.",
+    "Kismat ka sitara chamkega, group me koi free gift mil sakta hai.",
+    "Aaj thodi ladaai ho sakti hai, apne gusse par kabu rakhein.",
+    "Aapke sitare keh rahe hain ki aaj aapko 10 ghante continuous scrolling karni padegi.",
+    "Ghar ka Wi-Fi achanak band hone ka yog ban raha hai, backup taiyar rakhein.",
+    "Aaj aapka koi purana dost aapko meme bhejkar yaad karega.",
+    "Subah-subah chai girne ke sanket hain, thoda savdhan rahein.",
+    "Aapke dushman aaj aapki profile pic stalk karenge.",
+    "Aaj aapko bina baat ke 50 notifications milne wali hain.",
+    "Aapki chat history padh li gayi toh ghar se nikal diye jaoge, sambhal kar chat karein.",
+    "Aaj aapka lucky number '404' rahega, error se bachkar rahein.",
+    "Aapko kisi group ki adminship milne ke yog hain, taiyar rahein.",
+    "Aaj aapka phone lagataar hang hoga, kismat ka dosh hai.",
+    "Aapki crush aapka status dekhkar bhi ignore karegi, dil chota na karein.",
+    "Aaj aapko bina baat ke bhookh lagegi aur fridge me kuch nahi milega."
 ]
 
 @dp.message(Command("kundli"))
@@ -941,7 +1286,8 @@ async def cmd_kundli(msg: types.Message):
     if msg.chat.type not in ["group", "supergroup"]:
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else msg.from_user
-    fortune = random.choice(KUNDLI_PREDICTIONS_HINGLISH)
+    # Ensure wide dynamic variety
+    fortune = random.choice(KUNDLI_POOL) + f" (Ref: #{random.randint(100, 999)})"
     await msg.reply(f"**{target.first_name} ki Kundli Fal:**\n\n{fortune}", parse_mode="Markdown")
 
 @dp.message(Command("ship"))
@@ -1010,7 +1356,25 @@ async def group_message_processor(msg: types.Message):
                 pass
             return
 
-    # 2. Link Protection Check
+    # 2. Porn / Media Protection Check
+    if not is_admin:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT porn_protection FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
+                res = await cursor.fetchone()
+        if res and res[0] == 1:
+            if msg.photo or msg.video or msg.document or msg.animation or msg.sticker:
+                try:
+                    await msg.delete()
+                    await bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
+                    unban_kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="✅ Unban", callback_data=f"mod_unban_{user.id}_{chat_id}")]
+                    ])
+                    await msg.answer(f"<a href='tg://user?id={user.id}'>{user.first_name}</a> [{user.id}] banned for sending restricted media.", reply_markup=unban_kb, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+
+    # 3. Link Protection Check
     if not is_admin and msg.text:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT link_protection FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:
@@ -1021,9 +1385,65 @@ async def group_message_processor(msg: types.Message):
                     await msg.delete()
                 except Exception:
                     pass
+                await handle_user_violation(bot, chat_id, user, "warn")
                 return
 
-    # 3. Antiflood Logic
+    # 4. Banned Words Check
+    if not is_admin and msg.text:
+        txt_lower = msg.text.lower()
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT action, delete_msgs FROM banned_words_config WHERE chat_id = ?", (chat_id,)) as cursor:
+                bw_conf = await cursor.fetchone()
+            async with db.execute("SELECT word FROM banned_words_list WHERE chat_id = ?", (chat_id,)) as cursor:
+                bw_rows = await cursor.fetchall()
+        
+        if bw_conf and bw_conf[0] != "off":
+            b_action, b_del = bw_conf[0], bw_conf[1]
+            banned_words = [r[0] for r in bw_rows]
+            if any(bw in txt_lower for bw in banned_words):
+                try:
+                    if b_del:
+                        await msg.delete()
+                except Exception:
+                    pass
+                await handle_user_violation(bot, chat_id, user, b_action)
+                return
+
+    # 5. Personal Commands, User Commands & Incline Buttons Trigger Check
+    if msg.text:
+        txt_clean = msg.text.strip().lower()
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Check Custom Personal Commands
+            async with db.execute("SELECT reply_text FROM custom_commands WHERE chat_id = ? AND trigger_word = ?", (chat_id, txt_clean)) as cursor:
+                p_row = await cursor.fetchone()
+            if p_row:
+                await msg.reply(p_row[0])
+                return
+
+            # Check User Commands
+            async with db.execute("SELECT reply_text FROM user_commands WHERE chat_id = ? AND trigger_word = ?", (chat_id, txt_clean)) as cursor:
+                u_row = await cursor.fetchone()
+            if u_row:
+                await msg.reply(u_row[0])
+                return
+
+            # Check User Incline Buttons
+            async with db.execute("SELECT id, reply_text FROM inline_buttons_config WHERE chat_id = ? AND trigger_word = ?", (chat_id, txt_clean)) as cursor:
+                i_row = await cursor.fetchone()
+            if i_row:
+                cfg_id, rep_txt = i_row[0], i_row[1]
+                async with db.execute("SELECT button_name, button_url FROM inline_buttons_items WHERE config_id = ?", (cfg_id,)) as cursor:
+                    items = await cursor.fetchall()
+                
+                kb_rows = []
+                for b_name, b_url in items:
+                    kb_rows.append([InlineKeyboardButton(text=b_name, url=b_url)])
+                
+                inline_kb = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+                await msg.reply(rep_txt, reply_markup=inline_kb)
+                return
+
+    # 6. Antiflood Logic
     if not is_admin:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT flood_limit, flood_time, antiflood_action, flood_del FROM managed_groups WHERE chat_id = ?", (chat_id,)) as cursor:

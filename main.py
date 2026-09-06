@@ -1327,11 +1327,13 @@ async def cmd_admin(msg: types.Message):
         except Exception:
             await msg.answer("Error tagging admins.")
 
-# --- Protection & Group Activity Processor ---
+# --- Auto Group Registration via Message Handler ---
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_message_processor(msg: types.Message):
     chat_id = msg.chat.id
     user = msg.from_user
+    
+    # Ensure group is always registered automatically when any message arrives
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO managed_groups (chat_id, title) VALUES (?, ?)", (chat_id, msg.chat.title or "Group"))
         await db.commit()
